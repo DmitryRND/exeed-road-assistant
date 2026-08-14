@@ -1,13 +1,26 @@
+param(
+    [switch]$NoHud
+)
+
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$apktoolSource = Join-Path $projectRoot 'apktool-src'
+$apktoolSourceBase = Join-Path $projectRoot 'apktool-src'
+$apktoolSource = $apktoolSourceBase
 $sourceRoot = Join-Path $projectRoot 'src'
-$buildRoot = Join-Path $projectRoot 'build'
+$buildRoot = Join-Path $projectRoot $(if ($NoHud) { 'build-nohud' } else { 'build' })
 $classesDir = Join-Path $buildRoot 'classes'
 $dexDir = Join-Path $buildRoot 'dex'
-$unsignedApk = Join-Path $buildRoot 'exeed-awd-display-unsigned.apk'
-$signedApk = Join-Path $buildRoot 'exeed-awd-display.apk'
+$unsignedApk = Join-Path $buildRoot $(if ($NoHud) {
+    'exeed-awd-display-nohud-unsigned.apk'
+} else {
+    'exeed-awd-display-unsigned.apk'
+})
+$signedApk = Join-Path $buildRoot $(if ($NoHud) {
+    'exeed-awd-display-nohud.apk'
+} else {
+    'exeed-awd-display.apk'
+})
 $keystore = Join-Path $projectRoot '.debug\debug.keystore'
 
 function Resolve-Executable {
@@ -78,6 +91,21 @@ if (Test-Path -LiteralPath $buildRoot) {
     Remove-Item -LiteralPath $resolvedBuild -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $classesDir, $dexDir | Out-Null
+
+if ($NoHud) {
+    $apktoolSource = Join-Path $buildRoot 'apktool-src-nohud'
+    Copy-Item -LiteralPath $apktoolSourceBase -Destination $apktoolSource -Recurse
+    foreach ($generatedName in @('build', 'dist')) {
+        $generatedPath = Join-Path $apktoolSource $generatedName
+        if (Test-Path -LiteralPath $generatedPath) {
+            Remove-Item -LiteralPath $generatedPath -Recurse -Force
+        }
+    }
+    $markerPath = Join-Path $apktoolSource 'assets\hud_output_disabled'
+    [System.IO.File]::WriteAllText($markerPath,
+            'HUD broadcast and VHAL distance output are disabled in this build.')
+    Write-Host 'Building No HUD variant.'
+}
 
 Write-Host 'Compiling Java source...'
 $sourceFiles = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -Filter '*.java' |

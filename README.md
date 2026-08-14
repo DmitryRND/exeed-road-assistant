@@ -60,11 +60,13 @@ apktool 3.x. Задайте `JAVA_HOME`, `ANDROID_SDK_ROOT`; apktool долже�
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\test.ps1
 powershell -ExecutionPolicy Bypass -File .\build.ps1
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -NoHud
 ```
 
 Подписанный отладочным ключом APK появится в
-`build\exeed-awd-display.apk`. Локальный ключ создаётся в `.debug` и намеренно
-не публикуется.
+`build\exeed-awd-display.apk`. Вариант без отправки данных на HUD появится в
+`build-nohud\exeed-awd-display-nohud.apk`. Локальный ключ создаётся в `.debug`
+и намеренно не публикуется.
 
 Подробности находятся в [DEVELOPMENT.md](DEVELOPMENT.md), сценарий безопасной
 проверки — в [TESTING.md](TESTING.md).

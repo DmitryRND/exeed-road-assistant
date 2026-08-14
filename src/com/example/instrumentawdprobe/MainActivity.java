@@ -186,6 +186,7 @@ public final class MainActivity extends Activity {
     private AudioTrack alertAudioTrack;
     private boolean demoAlertActive;
     private boolean hudCameraActive;
+    private Boolean hudOutputAvailable;
     private int lastHudCameraDistance = -1;
     private long lastHudCameraUpdateMs;
     private int hudDistanceOverrideGeneration;
@@ -429,10 +430,18 @@ public final class MainActivity extends Activity {
         root.addView(cameraAudioCheck, matchWrap());
 
         cameraHudCheck = new CheckBox(this);
-        cameraHudCheck.setText("Предупреждения о камерах на HUD");
+        final boolean hudAvailable = isHudOutputAvailable();
+        if (!hudAvailable) {
+            preferences.edit().putBoolean(PREF_CAMERA_HUD, false).apply();
+        }
+        cameraHudCheck.setText(hudAvailable
+                ? "Предупреждения о камерах на HUD"
+                : "HUD отключён в этой сборке");
         cameraHudCheck.setTextSize(18f);
         cameraHudCheck.setTextColor(Color.rgb(52, 52, 50));
-        cameraHudCheck.setChecked(preferences.getBoolean(PREF_CAMERA_HUD, false));
+        cameraHudCheck.setChecked(hudAvailable
+                && preferences.getBoolean(PREF_CAMERA_HUD, false));
+        cameraHudCheck.setEnabled(hudAvailable);
         cameraHudCheck.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 boolean enabled = cameraHudCheck.isChecked();
@@ -566,7 +575,8 @@ public final class MainActivity extends Activity {
     private void handleControlIntent(Intent intent) {
         String action = intent == null ? null : intent.getAction();
         if (intent != null && intent.hasExtra("camera_hud_enabled")) {
-            boolean enabled = intent.getBooleanExtra("camera_hud_enabled", false);
+            boolean enabled = isHudOutputAvailable()
+                    && intent.getBooleanExtra("camera_hud_enabled", false);
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putBoolean(PREF_CAMERA_HUD, enabled).apply();
             if (cameraHudCheck != null) cameraHudCheck.setChecked(enabled);
@@ -1221,7 +1231,8 @@ public final class MainActivity extends Activity {
     }
 
     private void sendCameraHudAlert(SpeedCamera camera, int distanceMeters) {
-        if (!getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (!isHudOutputAvailable()
+                || !getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getBoolean(PREF_CAMERA_HUD, false)) return;
         long now = SystemClock.elapsedRealtime();
         if (hudCameraActive
@@ -1262,6 +1273,18 @@ public final class MainActivity extends Activity {
         lastHudCameraDistance = -1;
         lastHudCameraUpdateMs = 0L;
         Log.i(TAG, "HUD camera alert cleared");
+    }
+
+    private boolean isHudOutputAvailable() {
+        if (hudOutputAvailable != null) return hudOutputAvailable.booleanValue();
+        try {
+            InputStream marker = getAssets().open("hud_output_disabled");
+            marker.close();
+            hudOutputAvailable = Boolean.FALSE;
+        } catch (IOException markerMissing) {
+            hudOutputAvailable = Boolean.TRUE;
+        }
+        return hudOutputAvailable.booleanValue();
     }
 
     private void scheduleHudMetricDistanceOverride(final int distanceMeters) {
