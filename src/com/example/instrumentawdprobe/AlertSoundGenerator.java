@@ -15,29 +15,29 @@ final class AlertSoundGenerator {
             float timeMs = index * 1000f / sampleRate;
             double sample;
             if (style == 1) {
-                // Rounded three-note navigation cue with gentle overlaps.
+                // Quiet rounded three-note cue, kept below the level of media audio.
                 sample = warmTone(timeMs, index, sampleRate,
-                        80f, 420f, 659.25f, 55f, 130f) * 0.52
+                        80f, 440f, 622.25f, 90f, 190f) * 0.35
                         + warmTone(timeMs, index, sampleRate,
-                        370f, 760f, 830.61f, 60f, 155f) * 0.50
+                        370f, 790f, 739.99f, 100f, 230f) * 0.33
                         + warmTone(timeMs, index, sampleRate,
-                        700f, 1160f, 987.77f, 70f, 230f) * 0.49;
+                        710f, 1190f, 830.61f, 115f, 300f) * 0.31;
             } else if (style == 2) {
-                // Short, but no longer sharp: both notes have rounded edges.
+                // Compact two-note cue with subdued highs and long rounded tails.
                 sample = warmTone(timeMs, index, sampleRate,
-                        110f, 500f, 783.99f, 45f, 135f) * 0.54
+                        100f, 520f, 698.46f, 85f, 210f) * 0.37
                         + warmTone(timeMs, index, sampleRate,
-                        480f, 920f, 987.77f, 52f, 175f) * 0.54;
+                        490f, 960f, 830.61f, 95f, 270f) * 0.36;
             } else {
-                // Warm major chord with a calm resolving note.
+                // Low-level warm chord with a slow bloom and calm resolution.
                 sample = warmTone(timeMs, index, sampleRate,
-                        90f, 820f, 523.25f, 80f, 270f) * 0.32
+                        90f, 850f, 523.25f, 115f, 350f) * 0.23
                         + warmTone(timeMs, index, sampleRate,
-                        115f, 860f, 659.25f, 85f, 290f) * 0.26
+                        115f, 890f, 659.25f, 125f, 370f) * 0.18
                         + warmTone(timeMs, index, sampleRate,
-                        145f, 900f, 783.99f, 90f, 310f) * 0.20
+                        145f, 930f, 783.99f, 135f, 390f) * 0.14
                         + warmTone(timeMs, index, sampleRate,
-                        760f, 1180f, 1046.50f, 70f, 230f) * 0.21;
+                        770f, 1200f, 880.00f, 105f, 280f) * 0.13;
             }
             sample = Math.max(-0.88, Math.min(0.88, sample));
             short value = (short) Math.round(Short.MAX_VALUE * sample);
@@ -60,8 +60,8 @@ final class AlertSoundGenerator {
                 Math.min(position / attackMs, remaining / releaseMs));
         envelope = envelope * envelope * (3f - 2f * envelope);
         double phase = 2.0 * Math.PI * frequency * sampleIndex / sampleRate;
-        // A quiet subharmonic adds body without the brittle edge of a loud overtone.
-        double timbre = Math.sin(phase) * 0.90 + Math.sin(phase * 0.5) * 0.10;
+        // Extra low body replaces the brittle high-frequency emphasis of a hard beep.
+        double timbre = Math.sin(phase) * 0.82 + Math.sin(phase * 0.5) * 0.18;
         return envelope * timbre;
     }
 }

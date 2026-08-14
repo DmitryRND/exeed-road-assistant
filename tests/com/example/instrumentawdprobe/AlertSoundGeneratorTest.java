@@ -33,9 +33,9 @@ public final class AlertSoundGeneratorTest {
                 squareSum += normalized * normalized;
             }
             double rms = Math.sqrt(squareSum / frames);
-            require(peak >= 0.48 && peak <= 0.88,
+            require(peak >= 0.28 && peak <= 0.62,
                     "unexpected peak for style " + style + ": " + peak);
-            require(rms >= 0.10 && rms <= 0.28,
+            require(rms >= 0.065 && rms <= 0.18,
                     "unexpected RMS for style " + style + ": " + rms);
             require(maximumInRange(pcm, 0, SAMPLE_RATE * 50 / 1000) == 0,
                     "style " + style + " does not begin with silence");
