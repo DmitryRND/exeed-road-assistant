@@ -109,7 +109,7 @@ public final class MainActivity extends Activity {
     private static final long MAX_CAMERA_TEXT_BYTES = 25L * 1024L * 1024L;
     private static final int MIN_PRIMARY_CAMERA_COUNT = 50000;
     private static final String[] CAMERA_SOUND_NAMES = {
-            "Мягкий аккорд", "Навигационная мелодия", "Короткий сигнал"
+            "Мягкий аккорд", "Плавная мелодия", "Мягкий короткий сигнал"
     };
     private static final String[] CAMERA_WARNING_MODE_NAMES = {
             "Всегда", "Только при превышении скорости"
@@ -135,6 +135,8 @@ public final class MainActivity extends Activity {
     private static final int PROP_ESTIMATED_COUPLING_TORQUE = 560992876;
     private static final int PROP_ENGINE_WHEEL_TORQUE_RATIO = 560992877;
     private static final int PROP_MEAN_EFFECTIVE_TORQUE = 560992878;
+    private static final int PROP_HUD_DISTANCE_TO_DESTINATION = 560992986;
+    private static final int PROP_HUD_DISTANCE_TO_JUNCTION = 560992987;
     private static final int PROP_ENGINE_STATE = 557847175;
     private static final int PROP_LEVER_MODE = 557847156;
     private static final int[] AWD_PROPERTIES = {
@@ -186,6 +188,7 @@ public final class MainActivity extends Activity {
     private boolean hudCameraActive;
     private int lastHudCameraDistance = -1;
     private long lastHudCameraUpdateMs;
+    private int hudDistanceOverrideGeneration;
 
     private int rawEstimatedCouplingTorque = -1;
     private int rawEngineWheelTorqueRatio = -1;
@@ -1235,19 +1238,21 @@ public final class MainActivity extends Activity {
         // ExtraService to raw HUD status 31 (toll booth), used as camera icon.
         hud.putExtra("turn", 23);
         hud.putExtra("distance", distanceMeters);
-        // Zero suppresses a misleading second camera distance by the finish flag.
-        hud.putExtra("destDistance", 0);
+        // Treat the camera as the temporary destination so the finish distance is meaningful.
+        hud.putExtra("destDistance", distanceMeters);
         hud.putExtra("intervalMs", 1000L);
         sendBroadcast(hud);
         hudCameraActive = true;
         lastHudCameraDistance = distanceMeters;
         lastHudCameraUpdateMs = now;
+        scheduleHudMetricDistanceOverride(distanceMeters);
         Log.i(TAG, "HUD camera alert: icon=toll_booth telenav=23 raw=31 text='" + hudText
                 + "' distance=" + distanceMeters + " m");
     }
 
     private void clearCameraHudAlert() {
         if (!hudCameraActive) return;
+        hudDistanceOverrideGeneration++;
         Intent stop = new Intent("com.telenav.app.START");
         stop.setComponent(new ComponentName(
                 "com.telenav.app.arp", "com.telenav.app.receiver.BootReceiver"));
@@ -1257,6 +1262,41 @@ public final class MainActivity extends Activity {
         lastHudCameraDistance = -1;
         lastHudCameraUpdateMs = 0L;
         Log.i(TAG, "HUD camera alert cleared");
+    }
+
+    private void scheduleHudMetricDistanceOverride(final int distanceMeters) {
+        final int generation = ++hudDistanceOverrideGeneration;
+        // ExtraService writes unit=0 because its TeleNav adapter discards formattedDistance.
+        // Rewrite after its callback using the documented HUD unit code 1 (metres).
+        long[] delaysMs = {120L, 420L};
+        for (final long delayMs : delaysMs) {
+            overlayHandler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (!hudCameraActive || generation != hudDistanceOverrideGeneration) return;
+                    writeHudMetricDistances(distanceMeters);
+                }
+            }, delayMs);
+        }
+    }
+
+    private void writeHudMetricDistances(int distanceMeters) {
+        Object manager = vendorManager;
+        if (manager == null) {
+            Log.w(TAG, "HUD metric distance override skipped: vendor_extension is not ready");
+            return;
+        }
+        byte[] frame = HudDistanceEncoder.encodeMeters(distanceMeters);
+        try {
+            Method setProperty = manager.getClass().getMethod(
+                    "setProperty", Class.class, int.class, int.class, Object.class);
+            setProperty.invoke(manager, byte[].class,
+                    PROP_HUD_DISTANCE_TO_DESTINATION, 0, frame.clone());
+            setProperty.invoke(manager, byte[].class,
+                    PROP_HUD_DISTANCE_TO_JUNCTION, 0, frame.clone());
+            Log.d(TAG, "HUD metric distances written: " + distanceMeters + " m");
+        } catch (Throwable error) {
+            Log.w(TAG, "HUD metric distance override failed", error);
+        }
     }
 
     private void playCameraAlert() {
@@ -1275,7 +1315,7 @@ public final class MainActivity extends Activity {
             int soundStyle = Math.max(0, Math.min(CAMERA_SOUND_NAMES.length - 1,
                     getSharedPreferences(PREFS, MODE_PRIVATE)
                             .getInt(PREF_CAMERA_SOUND, 0)));
-            byte[] pcm = createAlertPcm(sampleRate, soundStyle);
+            byte[] pcm = AlertSoundGenerator.createPcm(sampleRate, soundStyle);
             AudioFormat format = new AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setSampleRate(sampleRate)
@@ -1316,7 +1356,7 @@ public final class MainActivity extends Activity {
                     }
                 }
             }, "CameraAlertAudio").start();
-            overlayHandler.postDelayed(releaseAlertAudio, 1450L);
+            overlayHandler.postDelayed(releaseAlertAudio, 1650L);
         } catch (Throwable error) {
             appendFailure("Navigation alert sound failed", error);
             releaseAlertSound();
@@ -1337,63 +1377,6 @@ public final class MainActivity extends Activity {
         return alertAudioManager.requestAudioFocus(alertFocusListener,
                 AudioManager.STREAM_MUSIC,
                 AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
-    }
-
-    private byte[] createAlertPcm(int sampleRate, int soundStyle) {
-        final int totalMs = 1200;
-        int sampleCount = sampleRate * totalMs / 1000;
-        byte[] pcm = new byte[sampleCount * 4];
-        for (int index = 0; index < sampleCount; index++) {
-            float timeMs = index * 1000f / sampleRate;
-            double sample;
-            if (soundStyle == 1) {
-                // Three rising notes: clear enough for navigation, but not alarm-like.
-                sample = melodicTone(timeMs, index, sampleRate,
-                        90f, 330f, 659.25f, 28f, 70f) * 0.42
-                        + melodicTone(timeMs, index, sampleRate,
-                        350f, 610f, 830.61f, 28f, 75f) * 0.40
-                        + melodicTone(timeMs, index, sampleRate,
-                        630f, 980f, 987.77f, 32f, 120f) * 0.39;
-            } else if (soundStyle == 2) {
-                // Compact two-note cue for drivers who prefer the shortest warning.
-                sample = melodicTone(timeMs, index, sampleRate,
-                        150f, 390f, 783.99f, 20f, 55f) * 0.44
-                        + melodicTone(timeMs, index, sampleRate,
-                        510f, 790f, 987.77f, 22f, 70f) * 0.44;
-            } else {
-                // Soft major chord with a small resolving shimmer.
-                sample = melodicTone(timeMs, index, sampleRate,
-                        100f, 720f, 523.25f, 55f, 190f) * 0.25
-                        + melodicTone(timeMs, index, sampleRate,
-                        120f, 760f, 659.25f, 60f, 210f) * 0.20
-                        + melodicTone(timeMs, index, sampleRate,
-                        145f, 800f, 783.99f, 65f, 230f) * 0.15
-                        + melodicTone(timeMs, index, sampleRate,
-                        690f, 1060f, 1046.50f, 45f, 150f) * 0.16;
-            }
-            sample = Math.max(-0.92, Math.min(0.92, sample));
-            short value = (short) (Short.MAX_VALUE * sample);
-            int offset = index * 4;
-            pcm[offset] = (byte) (value & 0xff);
-            pcm[offset + 1] = (byte) ((value >> 8) & 0xff);
-            pcm[offset + 2] = pcm[offset];
-            pcm[offset + 3] = pcm[offset + 1];
-        }
-        return pcm;
-    }
-
-    private double melodicTone(float timeMs, int sampleIndex, int sampleRate,
-                               float startMs, float endMs, float frequency,
-                               float attackMs, float releaseMs) {
-        if (timeMs < startMs || timeMs >= endMs) return 0.0;
-        float position = timeMs - startMs;
-        float remaining = endMs - timeMs;
-        float envelope = Math.min(1f,
-                Math.min(position / attackMs, remaining / releaseMs));
-        // Smooth the linear envelope so every note starts and ends without a click.
-        envelope = envelope * envelope * (3f - 2f * envelope);
-        return envelope * Math.sin(2.0 * Math.PI * frequency
-                * sampleIndex / sampleRate);
     }
 
     private void releaseAlertSound() {
@@ -1932,6 +1915,8 @@ public final class MainActivity extends Activity {
     }
 
     private static final class AwdView extends View {
+        private static final long ALERT_FADE_IN_MS = 380L;
+        private static final long ALERT_FADE_OUT_MS = 520L;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private float targetFrontAxle;
         private float targetRearAxle;
@@ -1941,6 +1926,8 @@ public final class MainActivity extends Activity {
         private String details = "ожидание сигналов";
         private SpeedCamera alertCamera;
         private float alertDistanceMeters;
+        private long alertFadeInStartedAtMs;
+        private long alertFadeOutStartedAtMs;
         private boolean radarIdle;
 
         AwdView(Context context) {
@@ -1964,16 +1951,20 @@ public final class MainActivity extends Activity {
         }
 
         void updateCameraAlert(SpeedCamera camera, float distanceMeters) {
+            boolean startFadeIn = alertCamera == null
+                    || alertCamera.id != camera.id
+                    || alertFadeOutStartedAtMs > 0L;
             alertCamera = camera;
             alertDistanceMeters = Math.max(0f, distanceMeters);
-            invalidate();
+            if (startFadeIn) alertFadeInStartedAtMs = SystemClock.uptimeMillis();
+            alertFadeOutStartedAtMs = 0L;
+            postInvalidateOnAnimation();
         }
 
         void clearCameraAlert() {
-            alertCamera = null;
-            alertDistanceMeters = 0f;
-            lastFrameTimeMs = 0L;
-            invalidate();
+            if (alertCamera == null || alertFadeOutStartedAtMs > 0L) return;
+            alertFadeOutStartedAtMs = SystemClock.uptimeMillis();
+            postInvalidateOnAnimation();
         }
 
         @Override protected void onDraw(Canvas canvas) {
@@ -2001,8 +1992,40 @@ public final class MainActivity extends Activity {
             canvas.drawRoundRect(panel, w * 0.04f, w * 0.04f, paint);
 
             if (alertCamera != null) {
-                drawCameraAlert(canvas, panel, alertCamera, alertDistanceMeters, scale);
-                return;
+                float alertAlpha;
+                boolean transitionRunning;
+                if (alertFadeOutStartedAtMs > 0L) {
+                    float progress = Math.min(1f,
+                            (frameTimeMs - alertFadeOutStartedAtMs) / (float) ALERT_FADE_OUT_MS);
+                    alertAlpha = 1f - smoothStep(progress);
+                    transitionRunning = progress < 1f;
+                    if (!transitionRunning) {
+                        alertCamera = null;
+                        alertDistanceMeters = 0f;
+                        alertFadeInStartedAtMs = 0L;
+                        alertFadeOutStartedAtMs = 0L;
+                        lastFrameTimeMs = 0L;
+                    }
+                } else {
+                    float progress = alertFadeInStartedAtMs <= 0L ? 1f : Math.min(1f,
+                            (frameTimeMs - alertFadeInStartedAtMs) / (float) ALERT_FADE_IN_MS);
+                    alertAlpha = smoothStep(progress);
+                    transitionRunning = progress < 1f;
+                }
+
+                if (alertCamera != null && alertAlpha > 0f) {
+                    int layerAlpha = Math.max(0, Math.min(255,
+                            Math.round(alertAlpha * 255f)));
+                    float transitionScale = 0.975f + alertAlpha * 0.025f;
+                    canvas.saveLayerAlpha(panel, layerAlpha);
+                    canvas.scale(transitionScale, transitionScale,
+                            panel.centerX(), panel.centerY());
+                    drawCameraAlert(canvas, panel, alertCamera,
+                            alertDistanceMeters, scale);
+                    canvas.restore();
+                    if (transitionRunning) postInvalidateOnAnimation();
+                    return;
+                }
             }
 
             if (radarIdle) {
@@ -2229,6 +2252,11 @@ public final class MainActivity extends Activity {
             float blend = 1f - (float) Math.exp(-deltaSeconds / timeConstant);
             float result = current + (target - current) * blend;
             return Math.abs(target - result) < 0.03f ? target : result;
+        }
+
+        private float smoothStep(float value) {
+            float clamped = Math.max(0f, Math.min(1f, value));
+            return clamped * clamped * (3f - 2f * clamped);
         }
 
         private void drawDriveLine(Canvas canvas, float x1, float y1, float x2, float y2,

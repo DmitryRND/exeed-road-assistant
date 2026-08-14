@@ -51,8 +51,12 @@ if (Test-Path -LiteralPath $testRoot) {
 New-Item -ItemType Directory -Force -Path $classes | Out-Null
 
 $sources = @(
+    (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\AlertSoundGenerator.java'),
+    (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\HudDistanceEncoder.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\SpeedCamera.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\SpeedCameraIndex.java'),
+    (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\AlertSoundGeneratorTest.java'),
+    (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\HudDistanceEncoderTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\SpeedCameraIndexTest.java')
 )
 & $javac -encoding UTF-8 -source 8 -target 8 -cp $androidJar -d $classes $sources
@@ -64,4 +68,13 @@ $official = Join-Path $projectRoot 'apktool-src\assets\official_speedcam.txt'
     'com.example.instrumentawdprobe.SpeedCameraIndexTest' $primary $official
 if ($LASTEXITCODE -ne 0) { throw "tests failed: $LASTEXITCODE" }
 
-Write-Host 'All camera database and geometry tests passed.'
+& $java -cp "$classes;$androidJar" `
+    'com.example.instrumentawdprobe.HudDistanceEncoderTest'
+if ($LASTEXITCODE -ne 0) { throw "HUD distance tests failed: $LASTEXITCODE" }
+
+$audioPreviews = Join-Path $testRoot 'audio-previews'
+& $java -cp "$classes;$androidJar" `
+    'com.example.instrumentawdprobe.AlertSoundGeneratorTest' $audioPreviews
+if ($LASTEXITCODE -ne 0) { throw "audio tests failed: $LASTEXITCODE" }
+
+Write-Host "All tests passed. Audio previews: $audioPreviews"
