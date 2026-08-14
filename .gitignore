@@ -1,0 +1,17 @@
+.debug/
+.idea/
+.vscode/
+build/
+build-test*/
+verification*/
+apktool-src/build/
+apktool-src/dist/
+*.apk
+*.zip
+*.jks
+*.keystore
+local.properties
+hud.zip
+prepare-asset.ps1
+build_official_supplement.py
+apktool-src/res/drawable-nodpi/
