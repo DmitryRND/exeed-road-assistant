@@ -8,8 +8,13 @@ $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $apktoolSourceBase = Join-Path $projectRoot 'apktool-src'
 $apktoolSource = $apktoolSourceBase
 $sourceRoot = Join-Path $projectRoot 'src'
+$compileStubRoot = Join-Path $projectRoot 'compile-stubs'
+$hiddenApiBypassJar = Join-Path $projectRoot `
+    'third_party\hiddenapibypass\classes.jar'
+$hiddenApiBypassSha256 = '6F50C4D202ACB8152901716DF3A1F94B2181E33AA0D14C9BDB2579CBC21C0832'
 $buildRoot = Join-Path $projectRoot $(if ($NoHud) { 'build-nohud' } else { 'build' })
 $classesDir = Join-Path $buildRoot 'classes'
+$compileStubClassesDir = Join-Path $buildRoot 'compile-stub-classes'
 $dexDir = Join-Path $buildRoot 'dex'
 $unsignedApk = Join-Path $buildRoot $(if ($NoHud) {
     'exeed-awd-display-nohud-unsigned.apk'
@@ -54,6 +59,14 @@ $androidSdk = $androidSdkCandidates |
 if (-not $androidSdk) {
     throw 'Android SDK not found. Set ANDROID_SDK_ROOT or ANDROID_HOME.'
 }
+if (-not (Test-Path -LiteralPath $hiddenApiBypassJar)) {
+    throw "HiddenApiBypass dependency not found: $hiddenApiBypassJar"
+}
+$actualHiddenApiBypassSha256 = (Get-FileHash -Algorithm SHA256 `
+    -LiteralPath $hiddenApiBypassJar).Hash
+if ($actualHiddenApiBypassSha256 -ne $hiddenApiBypassSha256) {
+    throw "HiddenApiBypass checksum mismatch: $actualHiddenApiBypassSha256"
+}
 
 $platform = Get-ChildItem -LiteralPath (Join-Path $androidSdk 'platforms') -Directory |
     Where-Object { $_.Name -match '^android-(\d+)$' } |
@@ -90,7 +103,8 @@ if (Test-Path -LiteralPath $buildRoot) {
     }
     Remove-Item -LiteralPath $resolvedBuild -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path $classesDir, $dexDir | Out-Null
+New-Item -ItemType Directory -Force -Path `
+    $classesDir, $compileStubClassesDir, $dexDir | Out-Null
 
 if ($NoHud) {
     $apktoolSource = Join-Path $buildRoot 'apktool-src-nohud'
@@ -108,10 +122,27 @@ if ($NoHud) {
 }
 
 Write-Host 'Compiling Java source...'
+$compileStubFiles = @(Get-ChildItem -LiteralPath $compileStubRoot -Recurse -Filter '*.java' |
+    Select-Object -ExpandProperty FullName)
+if ($compileStubFiles.Count -eq 0) { throw 'No compile-only Java stubs found' }
+& $javac -encoding UTF-8 -source 8 -target 8 -cp $androidJar `
+    -d $compileStubClassesDir $compileStubFiles
+if ($LASTEXITCODE -ne 0) { throw "compile-only javac failed: $LASTEXITCODE" }
+
+$compileStubJar = Join-Path $buildRoot 'compile-stubs.jar'
+Push-Location $compileStubClassesDir
+try {
+    & $jar cf $compileStubJar .
+    if ($LASTEXITCODE -ne 0) { throw "compile-only jar failed: $LASTEXITCODE" }
+} finally {
+    Pop-Location
+}
+
 $sourceFiles = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -Filter '*.java' |
     Select-Object -ExpandProperty FullName)
 if ($sourceFiles.Count -eq 0) { throw 'No Java source files found' }
-& $javac -encoding UTF-8 -source 8 -target 8 -cp $androidJar -d $classesDir $sourceFiles
+& $javac -encoding UTF-8 -source 8 -target 8 `
+    -cp "$androidJar;$compileStubJar;$hiddenApiBypassJar" -d $classesDir $sourceFiles
 if ($LASTEXITCODE -ne 0) { throw "javac failed: $LASTEXITCODE" }
 
 $classesJar = Join-Path $buildRoot 'classes.jar'
@@ -125,7 +156,8 @@ try {
 
 Write-Host 'Converting bytecode to classes.dex...'
 $env:JAVA_HOME = Split-Path -Parent $javaBin
-& $d8 --min-api 23 --lib $androidJar --output $dexDir $classesJar
+& $d8 --min-api 23 --lib $androidJar --lib $compileStubJar `
+    --output $dexDir $classesJar $hiddenApiBypassJar
 if ($LASTEXITCODE -ne 0) { throw "d8 failed: $LASTEXITCODE" }
 
 Write-Host 'Building APK resources and manifest...'

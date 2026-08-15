@@ -56,10 +56,8 @@ import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 
-import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.IOException;
 import java.lang.reflect.InvocationHandler;
@@ -70,8 +68,6 @@ import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.URL;
 import java.util.Arrays;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 /** Read-only probe for instrument Display 2 and the stock AWD energy-flow signals. */
 public final class MainActivity extends Activity {
@@ -159,6 +155,7 @@ public final class MainActivity extends Activity {
     private Spinner cameraWarningModeSpinner;
     private TextView cameraDistanceView;
     private TextView cameraDatabaseView;
+    private TextView batteryInfoView;
     private Button cameraUpdateButton;
     private AwdPresentation presentation;
     private WindowManager overlayWindowManager;
@@ -304,6 +301,7 @@ public final class MainActivity extends Activity {
                 new IntentFilter(CameraLocationService.ACTION_LOCATION_UPDATE));
         locationReceiverRegistered = true;
         buildControlUi();
+        refreshBatteryInfo();
         loadCameraDatabaseAsync(false);
         handleControlIntent(getIntent());
         if (getIntent().getBooleanExtra("boot_autostart", false)) {
@@ -366,6 +364,21 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { disableAwdDisplay(); }
         });
         root.addView(disableButton, controlButtonParams());
+
+        batteryInfoView = new TextView(this);
+        batteryInfoView.setText("12 В: чтение…");
+        batteryInfoView.setTextSize(18f);
+        batteryInfoView.setTextColor(Color.rgb(52, 52, 50));
+        batteryInfoView.setGravity(Gravity.CENTER);
+        batteryInfoView.setPadding(0, dp(4), 0, dp(8));
+        root.addView(batteryInfoView, matchWrap());
+
+        Button batteryRefreshButton = createControlButton("Обновить данные батареи",
+                Color.rgb(116, 107, 95), Color.WHITE);
+        batteryRefreshButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { refreshBatteryInfo(); }
+        });
+        root.addView(batteryRefreshButton, controlButtonParams());
 
         final SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         autostartCheck = new CheckBox(this);
@@ -556,6 +569,38 @@ public final class MainActivity extends Activity {
         button.setBackgroundTintList(ColorStateList.valueOf(background));
         button.setMinHeight(dp(64));
         return button;
+    }
+
+    private void refreshBatteryInfo() {
+        if (batteryInfoView == null) return;
+        batteryInfoView.setText("12 В: чтение…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final BatteryRpcReader.Result result = BatteryRpcReader.read();
+                    Log.i(TAG, "BATTERY_RPC OK " + result.diagnosticText());
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (batteryInfoView != null) {
+                                batteryInfoView.setText(result.displayText());
+                            }
+                        }
+                    });
+                } catch (final Throwable error) {
+                    Log.e(TAG, "BATTERY_RPC ERROR", error);
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (batteryInfoView != null) {
+                                Throwable cause = error;
+                                while (cause.getCause() != null) cause = cause.getCause();
+                                batteryInfoView.setText("12 В: недоступно ("
+                                        + cause.getClass().getSimpleName() + ")");
+                            }
+                        }
+                    });
+                }
+            }
+        }, "BatteryRpcReader").start();
     }
 
     private LinearLayout.LayoutParams controlButtonParams() {
@@ -853,20 +898,31 @@ public final class MainActivity extends Activity {
                     connection = (HttpURLConnection) new URL(CAMERA_DATABASE_URL).openConnection();
                     connection.setConnectTimeout(20000);
                     connection.setReadTimeout(90000);
-                    connection.setRequestProperty("User-Agent", "EXEED-Road-Assistant/2.1");
+                    connection.setRequestProperty("User-Agent", cameraUpdateUserAgent());
                     SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
                     String etag = preferences.getString(PREF_CAMERA_ETAG, null);
                     String lastModified = preferences.getString(
                             PREF_CAMERA_LAST_MODIFIED, null);
-                    if (etag != null && etag.length() > 0) {
-                        connection.setRequestProperty("If-None-Match", etag);
-                    }
-                    if (lastModified != null && lastModified.length() > 0) {
-                        connection.setRequestProperty("If-Modified-Since", lastModified);
+                    boolean conditionalRequest = hasUsableDownloadedCameraDatabase(
+                            cameraDatabaseFile());
+                    if (conditionalRequest) {
+                        if (etag != null && etag.length() > 0) {
+                            connection.setRequestProperty("If-None-Match", etag);
+                        }
+                        if (lastModified != null && lastModified.length() > 0) {
+                            connection.setRequestProperty("If-Modified-Since", lastModified);
+                        }
                     }
                     connection.connect();
                     int responseCode = connection.getResponseCode();
                     if (responseCode == HttpURLConnection.HTTP_NOT_MODIFIED) {
+                        if (!hasUsableDownloadedCameraDatabase(cameraDatabaseFile())) {
+                            preferences.edit()
+                                    .remove(PREF_CAMERA_ETAG)
+                                    .remove(PREF_CAMERA_LAST_MODIFIED)
+                                    .apply();
+                            throw new IOException("Сервер вернул 304, но локальная база недоступна");
+                        }
                         loadCameraDatabaseAsync(true);
                         return;
                     }
@@ -927,39 +983,31 @@ public final class MainActivity extends Activity {
 
     private void extractHudDatabase(InputStream networkInput, File target)
             throws IOException {
-        boolean found = false;
-        long extractedBytes = 0L;
-        try (ZipInputStream zip = new ZipInputStream(
-                new BufferedInputStream(networkInput))) {
-            ZipEntry entry;
-            while ((entry = zip.getNextEntry()) != null) {
-                String name = entry.getName().replace('\\', '/');
-                if (name.startsWith("/") || name.contains("../") || name.contains(":")) {
-                    throw new IOException("Небезопасное имя файла в архиве");
-                }
-                if (!entry.isDirectory() && CAMERA_DATABASE_ZIP_ENTRY.equals(name)) {
-                    if (found) throw new IOException("Повторяющийся файл базы в архиве");
-                    found = true;
-                    try (FileOutputStream output = new FileOutputStream(target)) {
-                        byte[] buffer = new byte[64 * 1024];
-                        int read;
-                        while ((read = zip.read(buffer)) >= 0) {
-                            if (read == 0) continue;
-                            extractedBytes += read;
-                            if (extractedBytes > MAX_CAMERA_TEXT_BYTES) {
-                                throw new IOException("Распакованная база слишком большая");
-                            }
-                            output.write(buffer, 0, read);
-                        }
-                        output.getFD().sync();
-                    }
-                }
-                zip.closeEntry();
+        CameraDatabaseUpdate.extractExactEntry(networkInput, target,
+                CAMERA_DATABASE_ZIP_ENTRY, MAX_CAMERA_ZIP_BYTES, MAX_CAMERA_TEXT_BYTES);
+    }
+
+    private boolean hasUsableDownloadedCameraDatabase(File file) {
+        if (file == null || !file.isFile()) return false;
+        try (InputStream input = new FileInputStream(file)) {
+            return SpeedCameraIndex.read(input).size() >= MIN_PRIMARY_CAMERA_COUNT;
+        } catch (Throwable error) {
+            Log.w(TAG, "Downloaded camera database is unavailable for conditional update", error);
+            return false;
+        }
+    }
+
+    private String cameraUpdateUserAgent() {
+        try {
+            String version = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0).versionName;
+            if (version != null && version.length() > 0) {
+                return "EXEED-Road-Assistant/" + version;
             }
+        } catch (Throwable error) {
+            Log.w(TAG, "Could not read app version for camera update", error);
         }
-        if (!found || extractedBytes == 0L || !target.isFile()) {
-            throw new IOException("В архиве отсутствует " + CAMERA_DATABASE_ZIP_ENTRY);
-        }
+        return "EXEED-Road-Assistant/unknown";
     }
 
     private String cameraUpdateErrorText(Throwable error) {
@@ -977,22 +1025,8 @@ public final class MainActivity extends Activity {
     }
 
     private void replaceCameraDatabase(File temporary) throws IOException {
-        File target = cameraDatabaseFile();
-        File backup = cameraDatabaseBackupFile();
-        if (backup.exists() && !backup.delete()) {
-            throw new IOException("Не удалось очистить резервную копию базы");
-        }
-        boolean backedUp = target.exists();
-        if (backedUp && !target.renameTo(backup)) {
-            throw new IOException("Не удалось создать резервную копию базы");
-        }
-        if (!temporary.renameTo(target)) {
-            if (backedUp && backup.exists() && !backup.renameTo(target)) {
-                Log.e(TAG, "Camera database rollback failed");
-            }
-            throw new IOException("Не удалось сохранить новую базу");
-        }
-        // Keep the previous validated database for rollback on the next launch.
+        CameraDatabaseUpdate.replaceKeepingBackup(temporary,
+                cameraDatabaseFile(), cameraDatabaseBackupFile());
     }
 
     private void startCameraMonitoring() {

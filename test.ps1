@@ -52,10 +52,12 @@ New-Item -ItemType Directory -Force -Path $classes | Out-Null
 
 $sources = @(
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\AlertSoundGenerator.java'),
+    (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\CameraDatabaseUpdate.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\HudDistanceEncoder.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\SpeedCamera.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\SpeedCameraIndex.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\AlertSoundGeneratorTest.java'),
+    (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\CameraDatabaseUpdateTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\HudDistanceEncoderTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\SpeedCameraIndexTest.java')
 )
@@ -71,6 +73,11 @@ if ($LASTEXITCODE -ne 0) { throw "tests failed: $LASTEXITCODE" }
 & $java -cp "$classes;$androidJar" `
     'com.example.instrumentawdprobe.HudDistanceEncoderTest'
 if ($LASTEXITCODE -ne 0) { throw "HUD distance tests failed: $LASTEXITCODE" }
+
+$cameraUpdateTestRoot = Join-Path $testRoot 'camera-update'
+& $java -cp "$classes;$androidJar" `
+    'com.example.instrumentawdprobe.CameraDatabaseUpdateTest' $cameraUpdateTestRoot
+if ($LASTEXITCODE -ne 0) { throw "camera database update tests failed: $LASTEXITCODE" }
 
 $audioPreviews = Join-Path $testRoot 'audio-previews'
 & $java -cp "$classes;$androidJar" `
