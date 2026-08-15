@@ -108,15 +108,16 @@ public final class MainActivity extends Activity {
     private static final int MIN_PRIMARY_CAMERA_COUNT = 50000;
     private static final String[] CAMERA_SOUND_NAMES = {
             "Мягкий аккорд", "Плавная мелодия", "Мягкий короткий сигнал",
-            "ICQ — Oh-oh", "Эпическое уведомление"
+            "ICQ — Oh-oh", "Эпическое уведомление", "Портал — гул"
     };
     private static final String[] CAMERA_SOUND_ASSETS = {
             null, null, null,
             "camera_sounds/icq-oh-oh.mp3",
-            "camera_sounds/epic-contact.mp3"
+            "camera_sounds/epic-contact.mp3",
+            "camera_sounds/portal-hum.mp3"
     };
     private static final float[] CAMERA_SOUND_VOLUMES = {
-            1f, 1f, 1f, 0.42f, 0.68f
+            1f, 1f, 1f, 0.42f, 0.68f, 0.34f
     };
     private static final String[] CAMERA_WARNING_MODE_NAMES = {
             "Всегда", "Только при превышении скорости"
