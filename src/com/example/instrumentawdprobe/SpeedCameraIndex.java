@@ -17,6 +17,7 @@ final class SpeedCameraIndex {
     static final String HUD_HEADER = HEADER + ",DISTANCE,ANGLE";
     private static final double CELL_DEGREES = 0.02;
     private static final double EARTH_RADIUS_METERS = 6371000.0;
+    static final float DUPLICATE_RADIUS_METERS = 20f;
 
     static final class Match {
         final SpeedCamera camera;
@@ -39,16 +40,6 @@ final class SpeedCameraIndex {
     static SpeedCameraIndex read(InputStream input) throws IOException {
         SpeedCameraIndex index = new SpeedCameraIndex();
         index.readInto(input);
-        index.validateSize();
-        return index;
-    }
-
-    static SpeedCameraIndex read(InputStream primary, InputStream supplemental)
-            throws IOException {
-        SpeedCameraIndex index = new SpeedCameraIndex();
-        index.readInto(primary);
-        index.validateSize();
-        index.readInto(supplemental);
         index.validateSize();
         return index;
     }
@@ -185,6 +176,13 @@ final class SpeedCameraIndex {
         }
         bucket.add(camera);
         count++;
+    }
+
+    static boolean areSamePhysicalCamera(SpeedCamera first, SpeedCamera second,
+                                         float radiusMeters) {
+        return first != null && second != null && distanceMeters(
+                first.latitude, first.longitude,
+                second.latitude, second.longitude) <= radiusMeters;
     }
 
     private static int parseInt(String value, int fallback) {

@@ -43,7 +43,7 @@ front = 100 - rear
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-car.ps1 `
-  -ApkPath .\road-assistant-2.17.apk
+  -ApkPath .\road-assistant-2.18.apk
 ```
 
 Скрипт проверяет, что подключено ровно одно авторизованное устройство,
@@ -82,8 +82,9 @@ adb shell am broadcast -a com.example.instrumentawdprobe.action.HIDE_AWD
 ## Источники данных
 
 В тестовый APK включена база HUD Speed/RadarBase. Обновление загружается с
-`https://dwn.jcartools.ru/arad/h_ru.zip`. Дополнительный слой содержит точки из
-открытых публикаций ГИБДД для регионов 23, 26, 61, 62 и 66.
+`https://dwn.jcartools.ru/arad/h_ru.zip`. Региональные точки из открытых
+публикаций ГИБДД не смешиваются с основной базой, чтобы исключить дубли и
+всенаправленные предупреждения без ограничения скорости.
 
 Формат основной базы:
 

@@ -86,9 +86,8 @@ $sources = @(
 if ($LASTEXITCODE -ne 0) { throw "javac failed: $LASTEXITCODE" }
 
 $primary = Join-Path $projectRoot 'apktool-src\assets\hud_speed.txt'
-$official = Join-Path $projectRoot 'apktool-src\assets\official_speedcam.txt'
 & $java -cp "$classes;$androidJar" `
-    'com.example.instrumentawdprobe.SpeedCameraIndexTest' $primary $official
+    'com.example.instrumentawdprobe.SpeedCameraIndexTest' $primary
 if ($LASTEXITCODE -ne 0) { throw "tests failed: $LASTEXITCODE" }
 
 & $java -cp "$classes;$androidJar" `

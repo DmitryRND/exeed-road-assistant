@@ -96,9 +96,6 @@ public final class MainActivity extends Activity {
     private static final long CAMERA_LOCATION_STALE_MS = 10000L;
     private static final long CAMERA_LOCATION_WATCHDOG_MS = 2000L;
     private static final String CAMERA_DATABASE_ASSET = "hud_speed.txt";
-    private static final String OFFICIAL_CAMERA_DATABASE_ASSET = "official_speedcam.txt";
-    private static final int OFFICIAL_CAMERA_COUNT = 2729;
-    private static final String OFFICIAL_CAMERA_REGIONS = "23/26/61/62/66";
     private static final String CAMERA_DATABASE_FILE = "hud_speed.txt";
     private static final String CAMERA_DATABASE_URL =
             "https://dwn.jcartools.ru/arad/h_ru.zip";
@@ -849,10 +846,7 @@ public final class MainActivity extends Activity {
                                 "HUD Speed · встроенная");
                     }
                     final SpeedCameraIndex loaded = candidate;
-                    final String source = candidateSource
-                            + " \u00b7 \u0413\u0418\u0411\u0414\u0414 "
-                            + OFFICIAL_CAMERA_REGIONS + ": "
-                            + OFFICIAL_CAMERA_COUNT;
+                    final String source = candidateSource;
                     cameraIndex = loaded;
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
@@ -882,15 +876,10 @@ public final class MainActivity extends Activity {
     }
 
     private SpeedCameraIndex readCameraDatabase(InputStream input) throws IOException {
-        InputStream official = null;
         try {
-            official = getAssets().open(OFFICIAL_CAMERA_DATABASE_ASSET);
-            return SpeedCameraIndex.read(input, official);
+            return SpeedCameraIndex.read(input);
         } finally {
             try { input.close(); } catch (IOException ignored) { }
-            if (official != null) {
-                try { official.close(); } catch (IOException ignored) { }
-            }
         }
     }
 
@@ -1174,15 +1163,6 @@ public final class MainActivity extends Activity {
             float bearingToCamera = SpeedCameraIndex.bearingDegrees(
                     location.getLatitude(), location.getLongitude(),
                     activeCamera.latitude, activeCamera.longitude);
-            boolean stillOnTravelPath = !hasCourse || SpeedCameraIndex.matchesTravelPath(
-                    activeCamera, course, bearingToCamera, distance);
-            if (!stillOnTravelPath) {
-                append("Camera alert cleared outside travel path: id=" + activeCamera.id
-                        + " course=" + Math.round(course)
-                        + " bearing=" + Math.round(bearingToCamera));
-                clearActiveCamera();
-                return;
-            }
             boolean behind = hasCourse
                     && SpeedCameraIndex.angleDifference(course, bearingToCamera) > 105f;
             boolean passed = SpeedCameraIndex.hasPassedCamera(
@@ -1192,6 +1172,20 @@ public final class MainActivity extends Activity {
                         + " minimum=" + Math.round(activeMinimumDistance)
                         + " m current=" + Math.round(distance) + " m");
                 lastPassedCamera = activeCamera;
+                clearActiveCamera();
+                return;
+            }
+            // Keep tracking a camera briefly after it moves behind us. Otherwise
+            // matchesTravelPath() clears it first and a nearby duplicate can be
+            // acquired immediately without recording the physical camera as passed.
+            boolean justBehindCamera = behind && activeMinimumDistance < 170f && distance <= 30f;
+            boolean stillOnTravelPath = !hasCourse || justBehindCamera
+                    || SpeedCameraIndex.matchesTravelPath(
+                    activeCamera, course, bearingToCamera, distance);
+            if (!stillOnTravelPath) {
+                append("Camera alert cleared outside travel path: id=" + activeCamera.id
+                        + " course=" + Math.round(course)
+                        + " bearing=" + Math.round(bearingToCamera));
                 clearActiveCamera();
                 return;
             }
@@ -1221,7 +1215,8 @@ public final class MainActivity extends Activity {
         SpeedCameraIndex.Match match = hasCourse ? index.findNearest(
                 location, course, true, warningDistance) : null;
         if (match != null && (lastPassedCamera == null
-                || match.camera.id != lastPassedCamera.id)
+                || !SpeedCameraIndex.areSamePhysicalCamera(match.camera, lastPassedCamera,
+                SpeedCameraIndex.DUPLICATE_RADIUS_METERS))
                 && shouldShowSpeedCamera(match.camera, location, false)) {
             activeCamera = match.camera;
             activeMinimumDistance = match.distanceMeters;
