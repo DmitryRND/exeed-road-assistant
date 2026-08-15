@@ -43,7 +43,7 @@ front = 100 - rear
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-car.ps1 `
-  -ApkPath .\road-assistant-2.14.apk
+  -ApkPath .\road-assistant-2.15.apk
 ```
 
 Скрипт проверяет, что подключено ровно одно авторизованное устройство,

@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.ServiceConnection;
+import android.content.res.AssetFileDescriptor;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -29,6 +30,7 @@ import android.media.AudioFocusRequest;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
+import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -105,7 +107,16 @@ public final class MainActivity extends Activity {
     private static final long MAX_CAMERA_TEXT_BYTES = 25L * 1024L * 1024L;
     private static final int MIN_PRIMARY_CAMERA_COUNT = 50000;
     private static final String[] CAMERA_SOUND_NAMES = {
-            "Мягкий аккорд", "Плавная мелодия", "Мягкий короткий сигнал"
+            "Мягкий аккорд", "Плавная мелодия", "Мягкий короткий сигнал",
+            "ICQ — Oh-oh", "Эпическое уведомление"
+    };
+    private static final String[] CAMERA_SOUND_ASSETS = {
+            null, null, null,
+            "camera_sounds/icq-oh-oh.mp3",
+            "camera_sounds/epic-contact.mp3"
+    };
+    private static final float[] CAMERA_SOUND_VOLUMES = {
+            1f, 1f, 1f, 0.42f, 0.68f
     };
     private static final String[] CAMERA_WARNING_MODE_NAMES = {
             "Всегда", "Только при превышении скорости"
@@ -181,6 +192,7 @@ public final class MainActivity extends Activity {
     private AudioManager alertAudioManager;
     private AudioFocusRequest alertFocusRequest;
     private AudioTrack alertAudioTrack;
+    private MediaPlayer alertMediaPlayer;
     private boolean demoAlertActive;
     private boolean hudCameraActive;
     private Boolean hudOutputAvailable;
@@ -1372,6 +1384,10 @@ public final class MainActivity extends Activity {
             int soundStyle = Math.max(0, Math.min(CAMERA_SOUND_NAMES.length - 1,
                     getSharedPreferences(PREFS, MODE_PRIVATE)
                             .getInt(PREF_CAMERA_SOUND, 0)));
+            if (CAMERA_SOUND_ASSETS[soundStyle] != null) {
+                playPackagedCameraAlert(soundStyle, attributes, focusResult);
+                return;
+            }
             byte[] pcm = AlertSoundGenerator.createPcm(sampleRate, soundStyle);
             AudioFormat format = new AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -1420,6 +1436,51 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void playPackagedCameraAlert(final int soundStyle,
+                                         AudioAttributes attributes,
+                                         int focusResult) throws IOException {
+        final MediaPlayer player = new MediaPlayer();
+        alertMediaPlayer = player;
+        try (AssetFileDescriptor asset = getAssets().openFd(
+                CAMERA_SOUND_ASSETS[soundStyle])) {
+            player.setAudioAttributes(attributes);
+            player.setDataSource(asset.getFileDescriptor(),
+                    asset.getStartOffset(), asset.getLength());
+            float volume = CAMERA_SOUND_VOLUMES[soundStyle];
+            player.setVolume(volume, volume);
+            player.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                @Override public void onCompletion(MediaPlayer completed) {
+                    if (alertMediaPlayer == completed) releaseAlertSound();
+                }
+            });
+            player.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                @Override public boolean onError(MediaPlayer failed, int what, int extra) {
+                    Log.e(TAG, "Packaged camera alert failed: what=" + what
+                            + " extra=" + extra);
+                    if (alertMediaPlayer == failed) releaseAlertSound();
+                    return true;
+                }
+            });
+            player.prepare();
+            int durationMs = Math.max(1, player.getDuration());
+            player.start();
+            append("Navigation alert asset started: focus=" + focusResult
+                    + " duration=" + durationMs
+                    + " volume=" + volume
+                    + " style=" + CAMERA_SOUND_NAMES[soundStyle]);
+            overlayHandler.postDelayed(releaseAlertAudio,
+                    Math.max(1000L, durationMs + 300L));
+        } catch (IOException error) {
+            try { player.release(); } catch (Throwable ignored) { }
+            if (alertMediaPlayer == player) alertMediaPlayer = null;
+            throw error;
+        } catch (RuntimeException error) {
+            try { player.release(); } catch (Throwable ignored) { }
+            if (alertMediaPlayer == player) alertMediaPlayer = null;
+            throw error;
+        }
+    }
+
     private int requestAlertAudioFocus(AudioAttributes attributes) {
         if (alertAudioManager == null) return AudioManager.AUDIOFOCUS_REQUEST_FAILED;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1442,6 +1503,11 @@ public final class MainActivity extends Activity {
             try { alertAudioTrack.stop(); } catch (Throwable ignored) { }
             try { alertAudioTrack.release(); } catch (Throwable ignored) { }
             alertAudioTrack = null;
+        }
+        if (alertMediaPlayer != null) {
+            try { alertMediaPlayer.stop(); } catch (Throwable ignored) { }
+            try { alertMediaPlayer.release(); } catch (Throwable ignored) { }
+            alertMediaPlayer = null;
         }
         if (alertAudioManager != null) {
             try {

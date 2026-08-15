@@ -50,6 +50,23 @@ if (Test-Path -LiteralPath $testRoot) {
 }
 New-Item -ItemType Directory -Force -Path $classes | Out-Null
 
+$cameraSoundHashes = @{
+    'apktool-src\assets\camera_sounds\icq-oh-oh.mp3' =
+        'CA109C0EE4B9FC90F5701EE0E075AF338D5C461E8E2F58144E6E3D41A55C3B90'
+    'apktool-src\assets\camera_sounds\epic-contact.mp3' =
+        '62B4AECCB848ABEF0CA71093B4CA8E03C3D7BCF563C939D5E673DBA80D4DFBEF'
+}
+foreach ($relativePath in $cameraSoundHashes.Keys) {
+    $assetPath = Join-Path $projectRoot $relativePath
+    if (-not (Test-Path -LiteralPath $assetPath)) {
+        throw "Camera sound asset not found: $relativePath"
+    }
+    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $assetPath).Hash
+    if ($actualHash -ne $cameraSoundHashes[$relativePath]) {
+        throw "Camera sound checksum mismatch: $relativePath"
+    }
+}
+
 $sources = @(
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\AlertSoundGenerator.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\CameraDatabaseUpdate.java'),
