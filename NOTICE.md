@@ -16,6 +16,6 @@
 Приложение включает AndroidHiddenApiBypass 6.1 (LSPosed), распространяемый по
 лицензии Apache License 2.0: https://github.com/LSPosed/AndroidHiddenApiBypass
 
-Файлы `icq-oh-oh.mp3`, `epic-contact.mp3` и `portal-hum.mp3` предоставлены
-пользователем для тестовой сборки. Права на эти аудиозаписи не передаются
-вместе с исходным кодом.
+Файлы `icq-oh-oh.mp3`, `epic-contact.mp3`, `portal-hum.mp3` и
+`ancient-whisper.mp3` предоставлены пользователем для тестовой сборки. Права
+на эти аудиозаписи не передаются вместе с исходным кодом.

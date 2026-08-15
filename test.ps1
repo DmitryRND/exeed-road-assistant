@@ -57,6 +57,8 @@ $cameraSoundHashes = @{
         '62B4AECCB848ABEF0CA71093B4CA8E03C3D7BCF563C939D5E673DBA80D4DFBEF'
     'apktool-src\assets\camera_sounds\portal-hum.mp3' =
         '5CABA8B9D684343D5871E431F98150758FFE662CB24D66877F548FE5CA409A04'
+    'apktool-src\assets\camera_sounds\ancient-whisper.mp3' =
+        'CA1B5E211AD16ABA12F94021B112F02C1EC2055DC6BA7AEB9733E2D9CC53FC24'
 }
 foreach ($relativePath in $cameraSoundHashes.Keys) {
     $assetPath = Join-Path $projectRoot $relativePath
