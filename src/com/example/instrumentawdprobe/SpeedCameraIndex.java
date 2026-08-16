@@ -18,6 +18,7 @@ final class SpeedCameraIndex {
     private static final double CELL_DEGREES = 0.02;
     private static final double EARTH_RADIUS_METERS = 6371000.0;
     static final float DUPLICATE_RADIUS_METERS = 20f;
+    static final float SAME_WARNING_ZONE_METERS = 200f;
 
     static final class Match {
         final SpeedCamera camera;
@@ -183,6 +184,23 @@ final class SpeedCameraIndex {
         return first != null && second != null && distanceMeters(
                 first.latitude, first.longitude,
                 second.latitude, second.longitude) <= radiusMeters;
+    }
+
+    static boolean areSameWarningZone(SpeedCamera first, SpeedCamera second) {
+        if (first == null || second == null) return false;
+        float distance = distanceMeters(first.latitude, first.longitude,
+                second.latitude, second.longitude);
+        if (distance <= DUPLICATE_RADIUS_METERS) return true;
+        if (distance > SAME_WARNING_ZONE_METERS) return false;
+
+        // Closely spaced records on the same approach commonly describe the
+        // speed and traffic-light functions of one intersection complex.
+        // Keep opposite directions and different speed limits independent.
+        if (first.directionType != 0 && second.directionType != 0
+                && angleDifference(first.direction, second.direction) > 25f) {
+            return false;
+        }
+        return first.speed <= 0 || second.speed <= 0 || first.speed == second.speed;
     }
 
     private static int parseInt(String value, int fallback) {

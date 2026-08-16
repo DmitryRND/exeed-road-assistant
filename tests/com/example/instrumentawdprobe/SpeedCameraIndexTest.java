@@ -68,6 +68,30 @@ public final class SpeedCameraIndexTest {
                         SpeedCameraIndex.DUPLICATE_RADIUS_METERS),
                 "distinct cameras were incorrectly grouped");
 
+        // Reported road-test regression on Nagibina Avenue: HUD Speed has a
+        // speed-camera record followed by two traffic-light control records
+        // for the same northbound intersection approach.
+        SpeedCamera nagibinaCamera = new SpeedCamera(
+                2405765, 39.720624, 47.264684, 1, 60, 1, 21);
+        SpeedCamera nagibinaTrafficLight = new SpeedCamera(
+                4142502, 39.720979, 47.265369, 3, 60, 1, 22);
+        SpeedCamera nagibinaNextTrafficLight = new SpeedCamera(
+                4147936, 39.721388, 47.266268, 3, 60, 1, 18);
+        require(SpeedCameraIndex.areSameWarningZone(
+                        nagibinaCamera, nagibinaTrafficLight),
+                "Nagibina intersection records were not grouped");
+        require(SpeedCameraIndex.areSameWarningZone(
+                        nagibinaCamera, nagibinaNextTrafficLight),
+                "Nagibina warning zone was too short");
+        require(!SpeedCameraIndex.areSameWarningZone(
+                        nagibinaCamera,
+                        new SpeedCamera(301, 39.720624, 47.265000, 1, 60, 1, 201)),
+                "opposite approaches were incorrectly grouped");
+        require(!SpeedCameraIndex.areSameWarningZone(
+                        nagibinaCamera,
+                        new SpeedCamera(302, 39.720624, 47.265000, 1, 40, 1, 21)),
+                "different speed limits were incorrectly grouped");
+
         SpeedCameraIndex northOnly = singleCameraIndex(
                 "101,37.6100000,55.7510000,1,60,1,0");
         require(northOnly.findNearest(55.7500, 37.6100, 0f, true, 200) != null,
@@ -126,6 +150,15 @@ public final class SpeedCameraIndexTest {
         require("СРЕДНЯЯ СКОРОСТЬ".equals(new SpeedCamera(
                 1, 0, 0, 4, 80, 0, 0).typeLabel()),
                 "camera type label is wrong");
+        require("Камера 60 км/ч".equals(new SpeedCamera(
+                2, 0, 0, 1, 60, 0, 0).hudLabel()),
+                "speed camera HUD label is wrong");
+        require("Камера на светофоре".equals(new SpeedCamera(
+                3, 0, 0, 2, 60, 0, 0).hudLabel()),
+                "traffic-light camera HUD label includes a speed limit");
+        require("Контроль светофора".equals(new SpeedCamera(
+                4, 0, 0, 3, 60, 0, 0).hudLabel()),
+                "traffic-light control HUD label includes a speed limit");
         System.out.println("OK records=" + index.size()
                 + " repaired=" + index.repairedRows()
                 + " distance=" + distance + " bearing=" + bearing

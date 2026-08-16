@@ -1215,8 +1215,8 @@ public final class MainActivity extends Activity {
         SpeedCameraIndex.Match match = hasCourse ? index.findNearest(
                 location, course, true, warningDistance) : null;
         if (match != null && (lastPassedCamera == null
-                || !SpeedCameraIndex.areSamePhysicalCamera(match.camera, lastPassedCamera,
-                SpeedCameraIndex.DUPLICATE_RADIUS_METERS))
+                || !SpeedCameraIndex.areSameWarningZone(
+                match.camera, lastPassedCamera))
                 && shouldShowSpeedCamera(match.camera, location, false)) {
             activeCamera = match.camera;
             activeMinimumDistance = match.distanceMeters;
@@ -1286,8 +1286,7 @@ public final class MainActivity extends Activity {
         hud.setComponent(new ComponentName(
                 "com.telenav.app.arp", "com.telenav.app.receiver.BootReceiver"));
         hud.putExtra("mode", "LEGACY");
-        String hudText = camera != null && camera.speed > 0
-                ? "Камера " + camera.speed + " км/ч" : "Камера";
+        String hudText = camera == null ? "Камера" : camera.hudLabel();
         hud.putExtra("street", hudText);
         // Physically verified on TXL2: TeleNav maneuver 23 is translated by
         // ExtraService to raw HUD status 31 (toll booth), used as camera icon.
