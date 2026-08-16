@@ -2,19 +2,17 @@
 
 ## Подготовка окружения
 
-Установите JDK 17, Android SDK Platform/Build Tools, apktool 3.x и Android
-Platform Tools. Пример переменных окружения:
+Установите JDK 21, Android SDK Platform/Build Tools и Android Platform Tools.
+MapKit 4.42 использует Java 21 API. Пример переменных окружения:
 
 ```powershell
-$env:JAVA_HOME = 'C:\Program Files\Microsoft\jdk-17'
+$env:JAVA_HOME = 'C:\Program Files\Microsoft\jdk-21'
 $env:ANDROID_SDK_ROOT = "$env:LOCALAPPDATA\Android\Sdk"
-$env:APKTOOL_JAR = 'C:\Tools\apktool\apktool.jar'
 ```
 
-`build.ps1` автоматически выбирает самую новую установленную Android platform
-и версию build-tools. Исходники компилируются `javac`, преобразуются через
-`d8`, ресурсы собираются apktool, после чего APK подписывается локальным
-отладочным ключом.
+Скопируйте `local.properties.example` в `local.properties` и задайте
+`MAPKIT_API_KEY`. `build.ps1` запускает Gradle Wrapper, собирает MapKit Full
+только для `arm64-v8a` и подписывает APK прежним локальным отладочным ключом.
 
 ## Запуск проверок
 
@@ -33,7 +31,9 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 | `src/.../MainActivity.java` | UI, VHAL, приборная панель, HUD и предупреждения |
 | `src/.../SpeedCameraIndex.java` | чтение, индексирование и выбор камеры |
 | `src/.../CameraLocationService.java` | фоновая геолокация |
+| `src/.../InstrumentMapSurfaceView.java` | MapKit и внешний Surface приборки |
 | `apktool-src/` | манифест, ресурсы и встроенные данные APK |
+| `app/build.gradle` | Gradle-варианты с HUD и без HUD, MapKit Full |
 | `tests/` | исполняемые регрессионные проверки |
 | `build.ps1` | воспроизводимая локальная сборка |
 | `install-car.ps1` | безопасная установка через ADB |
@@ -65,6 +65,7 @@ adb logcat -s InstrumentAwdProbe:I AndroidRuntime:E
 ## Подготовка изменения
 
 1. Не добавляйте `.debug`, APK и каталоги `build`/`verification` в Git.
+   Также никогда не добавляйте `local.properties` с ключом MapKit.
 2. Выполните `test.ps1` и `build.ps1`.
-3. Проверьте версию в `apktool-src/AndroidManifest.xml`.
+3. Проверьте версию в `app/build.gradle`.
 4. Для релиза приложите APK и SHA-256 из `Get-FileHash -Algorithm SHA256`.

@@ -1,0 +1,81 @@
+plugins {
+    id 'com.android.application'
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { localProperties.load(it) }
+}
+def mapkitApiKey = localProperties.getProperty('MAPKIT_API_KEY', '')
+        .replace('\\', '\\\\').replace('"', '\\"')
+
+android {
+    namespace 'com.example.instrumentawdprobe'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.example.instrumentawdprobe'
+        minSdk 26
+        targetSdk 28
+        versionCode 32
+        versionName '2.20-map-preview'
+        buildConfigField 'String', 'MAPKIT_API_KEY', "\"${mapkitApiKey}\""
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    signingConfigs {
+        debug {
+            storeFile rootProject.file('.debug/debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    flavorDimensions 'hud'
+    productFlavors {
+        hud { dimension 'hud' }
+        nohud { dimension 'hud' }
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile '../apktool-src/AndroidManifest.xml'
+            java.srcDirs = ['../src']
+            res.srcDirs = ['../apktool-src/res']
+            assets.srcDirs = ['../apktool-src/assets']
+        }
+        nohud.assets.srcDir 'src/nohud/assets'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        disable 'ExpiredTargetSdkVersion'
+    }
+}
+
+dependencies {
+    implementation files('../third_party/hiddenapibypass/classes.jar')
+    implementation 'com.yandex.android:maps.mobile:4.42.0-full'
+}

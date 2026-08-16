@@ -1,8 +1,8 @@
 # Дорожный ассистент для EXEED
 
 Экспериментальное Android-приложение для предупреждения о дорожных камерах,
-вывода предупреждений на HUD и визуализации распределения момента в штатной
-навигационной области приборной панели EXEED TXL2.
+вывода предупреждений на HUD, визуализации распределения момента и карты
+MapKit в штатной навигационной области приборной панели EXEED TXL2.
 
 > Приложение не является штатным ПО производителя. Установка требует ADB и
 > выполняется на ответственность владельца. Первую проверку проводите на
@@ -20,6 +20,9 @@
 - обновление российской базы HUD Speed из приложения с сохранением предыдущей
   рабочей версии для отката;
 - визуализация распределения момента между передней и задней осями;
+- экспериментальный режим карты с положением автомобиля, направлением,
+  пробками и автоматической дневной/ночной темой;
+- выбор заставки приборной панели: авто, полный привод, радар или карта;
 - автозапуск и ручное включение/выключение штатной навигационной области.
 - чтение параметров 12-вольтовой батареи на совместимых прошивках EXEED.
 
@@ -43,7 +46,7 @@ front = 100 - rear
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-car.ps1 `
-  -ApkPath .\road-assistant-2.19.apk
+  -ApkPath .\road-assistant-2.20-map-preview.apk
 ```
 
 Скрипт проверяет, что подключено ровно одно авторизованное устройство,
@@ -54,9 +57,9 @@ powershell -ExecutionPolicy Bypass -File .\install-car.ps1 `
 
 ## Сборка из исходников
 
-Требуются Windows PowerShell, JDK 17, Android SDK с platform/build-tools и
-apktool 3.x. Задайте `JAVA_HOME`, `ANDROID_SDK_ROOT`; apktool должен быть в
-`PATH` либо путь к JAR задаётся переменной `APKTOOL_JAR`.
+Требуются Windows PowerShell, JDK 21 и Android SDK. Скопируйте
+`local.properties.example` в `local.properties`, задайте путь к SDK и свой
+ключ Yandex MapKit. Ключ не должен попадать в Git.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\test.ps1
@@ -66,8 +69,9 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -NoHud
 
 Подписанный отладочным ключом APK появится в
 `build\exeed-awd-display.apk`. Вариант без отправки данных на HUD появится в
-`build-nohud\exeed-awd-display-nohud.apk`. Локальный ключ создаётся в `.debug`
-и намеренно не публикуется.
+`build-nohud\exeed-awd-display-nohud.apk`. Сборка выполняется Gradle и включает
+MapKit Full для `arm64-v8a`. Локальный ключ подписи создаётся в `.debug` и
+намеренно не публикуется.
 
 Подробности находятся в [DEVELOPMENT.md](DEVELOPMENT.md), сценарий безопасной
 проверки — в [TESTING.md](TESTING.md).
@@ -100,6 +104,9 @@ IDX,X,Y,TYPE,SPEED,DIRTYPE,DIRECTION,DISTANCE,ANGLE
 
 - Интеграция с приборной панелью и HUD зависит от сервисов конкретной прошивки
   EXEED; на других автомобилях эти функции могут быть недоступны.
+- Карта требует Android 8/API 26+, интернет, GPS и API-ключ MapKit. Текущая
+  предварительная версия показывает отдельную карту и не получает маршрут,
+  построенный в приложении Яндекс Карты.
 - Направление определяется по GPS-курсу либо по накопленному перемещению, поэтому
   на малой скорости возможна задержка выбора камеры.
 - Сигналы силовой установки и полного привода читаются без изменения. При
@@ -114,13 +121,15 @@ IDX,X,Y,TYPE,SPEED,DIRTYPE,DIRECTION,DISTANCE,ANGLE
 ```mermaid
 flowchart LR
     GPS["Android Location"] --> Match["Фильтр камер и направления"]
-    DB["HUD Speed + слой ГИБДД"] --> Match
+    DB["HUD Speed"] --> Match
     Match --> Cluster["Виджет приборной панели"]
     Match --> Sound["Звуковое предупреждение"]
     Match --> Telenav["FakeTeleNav / ExtraService"]
     Telenav --> HUD["HUD через VHAL и CAN"]
     VHAL["Read-only VHAL"] --> AWD["Расчёт распределения осей"]
     AWD --> Cluster
+    MapKit["MapKit OffscreenMapWindow"] --> Surface["Surface дисплея 2"]
+    Surface --> Cluster
 ```
 
 ## Версии

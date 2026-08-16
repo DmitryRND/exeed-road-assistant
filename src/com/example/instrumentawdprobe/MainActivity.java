@@ -125,11 +125,12 @@ public final class MainActivity extends Activity {
     private static final int CAMERA_WARNING_OVERSPEED = 1;
     private static final float OVERSPEED_ACTIVATION_MARGIN_KMH = 2f;
     private static final String[] IDLE_MODE_NAMES = {
-            "Авто", "Полный привод", "Радар"
+            "Авто", "Полный привод", "Радар", "Карта"
     };
     private static final int IDLE_MODE_AUTO = 0;
     private static final int IDLE_MODE_AWD = 1;
     private static final int IDLE_MODE_RADAR = 2;
+    private static final int IDLE_MODE_MAP = 3;
 
     private static final String IPK_PACKAGE = "com.neusoft.ipkservice";
     private static final String IPK_SERVICE =
@@ -171,7 +172,9 @@ public final class MainActivity extends Activity {
     private AwdPresentation presentation;
     private WindowManager overlayWindowManager;
     private View overlayRoot;
+    private FrameLayout overlayContentRoot;
     private AwdView overlayView;
+    private InstrumentMapSurfaceView overlayMapView;
     private Object car;
     private Object vendorManager;
     private Object vendorCallback;
@@ -348,7 +351,7 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT));
 
         TextView notice = new TextView(this);
-        notice.setText("Радар дорожных камер и визуализация полного привода");
+        notice.setText("Камеры, карта и визуализация полного привода");
         notice.setTextColor(Color.rgb(104, 103, 98));
         notice.setTextSize(17f);
         notice.setGravity(Gravity.CENTER);
@@ -1670,15 +1673,22 @@ public final class MainActivity extends Activity {
                 overlayView.updateCameraAlert(activeCamera, distance);
             }
 
+            overlayContentRoot = new FrameLayout(displayContext);
+            overlayContentRoot.setBackgroundColor(Color.TRANSPARENT);
+            overlayContentRoot.addView(overlayView, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            updateInstrumentMapMode();
+
             if (fullScreen) {
                 FrameLayout root = new FrameLayout(displayContext);
                 root.setBackgroundColor(Color.TRANSPARENT);
                 FrameLayout.LayoutParams miniMapParams = new FrameLayout.LayoutParams(
                         637, 637, Gravity.TOP | Gravity.RIGHT);
-                root.addView(overlayView, miniMapParams);
+                root.addView(overlayContentRoot, miniMapParams);
                 overlayRoot = root;
             } else {
-                overlayRoot = overlayView;
+                overlayRoot = overlayContentRoot;
             }
 
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
@@ -1697,9 +1707,9 @@ public final class MainActivity extends Activity {
             if (!liveFullOverlay) {
                 overlayHandler.postDelayed(overlayTimeout, fullScreen ? 8000L : 15000L);
             }
-            append("AWD overlay added: displayId=" + display.getDisplayId()
+            append("Instrument overlay added: displayId=" + display.getDisplayId()
                     + (fullScreen
-                    ? " root=(0,0) 1920x720; AWD child=(1283,0) 637x637; "
+                    ? " root=(0,0) 1920x720; content child=(1283,0) 637x637; "
                     + (liveFullOverlay ? "live until explicit stop" : "automatic removal in 8 seconds")
                     : " rect=(1283,0) 637x637; automatic removal in 15 seconds"));
             updateControlUi(true, "Включено");
@@ -1712,6 +1722,11 @@ public final class MainActivity extends Activity {
 
     private void dismissInstrumentOverlay() {
         overlayHandler.removeCallbacks(overlayTimeout);
+        if (overlayMapView != null && overlayContentRoot != null) {
+            try { overlayContentRoot.removeView(overlayMapView); }
+            catch (Throwable error) { Log.w(TAG, "Map surface removal failed", error); }
+        }
+        overlayMapView = null;
         if (overlayRoot != null && overlayWindowManager != null) {
             try {
                 overlayWindowManager.removeView(overlayRoot);
@@ -1721,6 +1736,7 @@ public final class MainActivity extends Activity {
             }
         }
         overlayRoot = null;
+        overlayContentRoot = null;
         overlayView = null;
         overlayWindowManager = null;
     }
@@ -1935,14 +1951,41 @@ public final class MainActivity extends Activity {
         int mode = getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getInt(PREF_IDLE_MODE, IDLE_MODE_AUTO);
         if (mode == IDLE_MODE_RADAR) return true;
-        if (mode == IDLE_MODE_AWD) return false;
+        if (mode == IDLE_MODE_AWD || mode == IDLE_MODE_MAP) return false;
         return !hasAwdSignalData();
+    }
+
+    private boolean shouldShowMapIdle() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getInt(PREF_IDLE_MODE, IDLE_MODE_AUTO) == IDLE_MODE_MAP;
     }
 
     private void updateOverlayIdleMode() {
         boolean radarIdle = shouldShowRadarIdle();
         if (overlayView != null) overlayView.setRadarIdle(radarIdle);
         if (presentation != null) presentation.setRadarIdle(radarIdle);
+        updateInstrumentMapMode();
+    }
+
+    private void updateInstrumentMapMode() {
+        if (overlayContentRoot == null || overlayView == null) return;
+        boolean mapRequested = shouldShowMapIdle();
+        boolean mapEnabled = mapRequested && RoadAssistantApplication.hasMapKitApiKey();
+        overlayView.setMapIdle(mapEnabled);
+        if (mapEnabled && overlayMapView == null) {
+            overlayMapView = new InstrumentMapSurfaceView(overlayContentRoot.getContext());
+            FrameLayout.LayoutParams mapParams = new FrameLayout.LayoutParams(277, 306);
+            mapParams.leftMargin = 258;
+            mapParams.topMargin = 83;
+            overlayContentRoot.addView(overlayMapView, 0, mapParams);
+            append("Instrument mode: Yandex map 277x306");
+        } else if (!mapEnabled && overlayMapView != null) {
+            overlayContentRoot.removeView(overlayMapView);
+            overlayMapView = null;
+        }
+        if (mapRequested && !mapEnabled) {
+            append("Instrument map is unavailable: MAPKIT_API_KEY is missing");
+        }
     }
 
     private String valueText(Object value) {
@@ -2049,6 +2092,7 @@ public final class MainActivity extends Activity {
         private long alertFadeInStartedAtMs;
         private long alertFadeOutStartedAtMs;
         private boolean radarIdle;
+        private boolean mapIdle;
 
         AwdView(Context context) {
             super(context);
@@ -2066,6 +2110,13 @@ public final class MainActivity extends Activity {
         void setRadarIdle(boolean radarIdle) {
             if (this.radarIdle == radarIdle) return;
             this.radarIdle = radarIdle;
+            lastFrameTimeMs = 0L;
+            postInvalidateOnAnimation();
+        }
+
+        void setMapIdle(boolean mapIdle) {
+            if (this.mapIdle == mapIdle) return;
+            this.mapIdle = mapIdle;
             lastFrameTimeMs = 0L;
             postInvalidateOnAnimation();
         }
@@ -2103,6 +2154,7 @@ public final class MainActivity extends Activity {
             float scale = Math.max(0.75f, Math.min(w, h) / 637f);
 
             RectF panel = new RectF(w * 0.405f, h * 0.13f, w * 0.84f, h * 0.61f);
+            if (mapIdle && alertCamera == null) return;
             paint.clearShadowLayer();
             paint.setShader(null);
             paint.setAlpha(255);
@@ -2125,6 +2177,7 @@ public final class MainActivity extends Activity {
                         alertFadeInStartedAtMs = 0L;
                         alertFadeOutStartedAtMs = 0L;
                         lastFrameTimeMs = 0L;
+                        postInvalidateOnAnimation();
                     }
                 } else {
                     float progress = alertFadeInStartedAtMs <= 0L ? 1f : Math.min(1f,

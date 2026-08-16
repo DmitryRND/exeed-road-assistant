@@ -1,6 +1,6 @@
 package com.example.instrumentawdprobe;
 
-import alfusos.rpc.RpcManager;
+import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Locale;
 
@@ -40,13 +40,16 @@ final class BatteryRpcReader {
     private BatteryRpcReader() { }
 
     static Result read() throws Exception {
-        RpcManager manager = RpcManager.getInstance();
+        Class<?> managerClass = Class.forName("alfusos.rpc.RpcManager");
+        Object manager = managerClass.getMethod("getInstance").invoke(null);
         if (manager == null) {
             throw new IllegalStateException("Alfus RPC service is unavailable");
         }
+        Method getMessage = managerClass.getMethod(
+                "getMessage", int.class, byte[].class);
 
-        byte[] voltageResponse = request(manager, 0x9F);
-        byte[] stateResponse = request(manager, 0x9E);
+        byte[] voltageResponse = request(manager, getMessage, 0x9F);
+        byte[] stateResponse = request(manager, getMessage, 0x9E);
 
         requireLength("voltage", voltageResponse, 3);
         requireLength("SOC/SOH", stateResponse, 3);
@@ -59,10 +62,11 @@ final class BatteryRpcReader {
         return new Result(voltage, soc, soh, voltageResponse, stateResponse);
     }
 
-    private static byte[] request(RpcManager manager, int subOpcode) {
+    private static byte[] request(Object manager, Method getMessage,
+                                  int subOpcode) throws Exception {
         byte[] request = new byte[25];
         request[0] = (byte) subOpcode;
-        return manager.getMessage(GET_OPCODE, request);
+        return (byte[]) getMessage.invoke(manager, GET_OPCODE, request);
     }
 
     private static void requireLength(String name, byte[] response, int minimum) {

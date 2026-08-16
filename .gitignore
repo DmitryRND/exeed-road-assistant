@@ -1,4 +1,5 @@
 .debug/
+.gradle/
 .idea/
 .vscode/
 build/
