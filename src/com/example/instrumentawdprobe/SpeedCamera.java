@@ -54,4 +54,18 @@ final class SpeedCamera {
             default: return "ДОРОЖНЫЙ КОНТРОЛЬ";
         }
     }
+
+    String hudLabel() {
+        switch (type) {
+            case 2: return "Камера на светофоре";
+            case 3: return "Контроль светофора";
+            case 4:
+                return speed > 0
+                        ? "Средняя скорость " + speed + " км/ч"
+                        : "Средняя скорость";
+            case 6: return "Ж/Д переезд";
+            default:
+                return speed > 0 ? "Камера " + speed + " км/ч" : "Камера";
+        }
+    }
 }

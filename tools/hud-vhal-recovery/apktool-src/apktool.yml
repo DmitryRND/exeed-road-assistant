@@ -1,5 +1,5 @@
 version: 3.0.2
-apkFileName: instrument-awd-probe.apk
+apkFileName: hud-vhal-recovery.apk
 usesFramework:
   ids:
   - 1
@@ -8,10 +8,9 @@ sdkInfo:
   targetSdkVersion: 28
 versionInfo:
   versionCode: 1
-  versionName: '0.1'
+  versionName: '1.0'
 resourcesInfo:
   packageId: 127
 doNotCompress:
 - arsc
 - dex
-- mp3

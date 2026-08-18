@@ -1,7 +1,9 @@
 .debug/
+.gradle/
 .idea/
 .vscode/
 build/
+build-nohud/
 build-test*/
 verification*/
 apktool-src/build/

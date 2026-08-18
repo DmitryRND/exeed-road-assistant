@@ -1,139 +1,74 @@
+param(
+    [switch]$NoHud
+)
+
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$apktoolSource = Join-Path $projectRoot 'apktool-src'
-$sourceRoot = Join-Path $projectRoot 'src'
-$buildRoot = Join-Path $projectRoot 'build'
-$classesDir = Join-Path $buildRoot 'classes'
-$dexDir = Join-Path $buildRoot 'dex'
-$unsignedApk = Join-Path $buildRoot 'exeed-awd-display-unsigned.apk'
-$signedApk = Join-Path $buildRoot 'exeed-awd-display.apk'
-$keystore = Join-Path $projectRoot '.debug\debug.keystore'
-
-function Resolve-Executable {
-    param([string[]]$Names, [string[]]$Candidates = @())
-    foreach ($name in $Names) {
-        $command = Get-Command $name -ErrorAction SilentlyContinue
-        if ($command) { return $command.Source }
-    }
-    foreach ($candidate in $Candidates) {
-        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-            return (Resolve-Path -LiteralPath $candidate).Path
-        }
-    }
-    throw "Required tool not found: $($Names -join ', ')"
-}
-
-$javaCandidates = @()
-if ($env:JAVA_HOME) { $javaCandidates += Join-Path $env:JAVA_HOME 'bin\java.exe' }
-$java = Resolve-Executable @('java.exe', 'java') $javaCandidates
-$javaBin = Split-Path -Parent $java
-$javac = Resolve-Executable @('javac.exe', 'javac') @(Join-Path $javaBin 'javac.exe')
-$jar = Resolve-Executable @('jar.exe', 'jar') @(Join-Path $javaBin 'jar.exe')
-$keytool = Resolve-Executable @('keytool.exe', 'keytool') @(Join-Path $javaBin 'keytool.exe')
-$jarsigner = Resolve-Executable @('jarsigner.exe', 'jarsigner') @(Join-Path $javaBin 'jarsigner.exe')
-
-$androidSdkCandidates = @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME)
-if ($env:LOCALAPPDATA) { $androidSdkCandidates += Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
-$androidSdk = $androidSdkCandidates |
-    Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
-    Select-Object -First 1
-if (-not $androidSdk) {
-    throw 'Android SDK not found. Set ANDROID_SDK_ROOT or ANDROID_HOME.'
-}
-
-$platform = Get-ChildItem -LiteralPath (Join-Path $androidSdk 'platforms') -Directory |
-    Where-Object { $_.Name -match '^android-(\d+)$' } |
-    Sort-Object { [int]($_.Name -replace '^android-', '') } -Descending |
-    Select-Object -First 1
-if (-not $platform) { throw "No Android SDK platform found in $androidSdk" }
-$androidJar = Join-Path $platform.FullName 'android.jar'
-
-$buildTools = Get-ChildItem -LiteralPath (Join-Path $androidSdk 'build-tools') -Directory |
-    Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } } -Descending |
-    Select-Object -First 1
-if (-not $buildTools) { throw "No Android build-tools found in $androidSdk" }
-$d8 = Join-Path $buildTools.FullName 'd8.bat'
-if (-not (Test-Path -LiteralPath $d8)) { throw "d8 not found: $d8" }
-
-$apktoolCommand = Get-Command apktool.bat, apktool -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-$apktoolJarCandidates = @($env:APKTOOL_JAR)
-if ($env:USERPROFILE) {
-    $apktoolJarCandidates += Join-Path $env:USERPROFILE 'Tools\apktool\apktool.jar'
-}
-$apktoolJar = $apktoolJarCandidates |
-    Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
-    Select-Object -First 1
-if (-not $apktoolCommand -and -not $apktoolJar) {
-    throw 'apktool not found. Add apktool to PATH or set APKTOOL_JAR.'
-}
-
-if (Test-Path -LiteralPath $buildRoot) {
-    $resolvedProject = (Resolve-Path -LiteralPath $projectRoot).Path
-    $resolvedBuild = (Resolve-Path -LiteralPath $buildRoot).Path
-    if (-not $resolvedBuild.StartsWith($resolvedProject + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to clean unexpected path: $resolvedBuild"
-    }
-    Remove-Item -LiteralPath $resolvedBuild -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $classesDir, $dexDir | Out-Null
-
-Write-Host 'Compiling Java source...'
-$sourceFiles = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -Filter '*.java' |
-    Select-Object -ExpandProperty FullName)
-if ($sourceFiles.Count -eq 0) { throw 'No Java source files found' }
-& $javac -encoding UTF-8 -source 8 -target 8 -cp $androidJar -d $classesDir $sourceFiles
-if ($LASTEXITCODE -ne 0) { throw "javac failed: $LASTEXITCODE" }
-
-$classesJar = Join-Path $buildRoot 'classes.jar'
-Push-Location $classesDir
-try {
-    & $jar cf $classesJar .
-    if ($LASTEXITCODE -ne 0) { throw "jar failed: $LASTEXITCODE" }
-} finally {
-    Pop-Location
-}
-
-Write-Host 'Converting bytecode to classes.dex...'
-$env:JAVA_HOME = Split-Path -Parent $javaBin
-& $d8 --min-api 23 --lib $androidJar --output $dexDir $classesJar
-if ($LASTEXITCODE -ne 0) { throw "d8 failed: $LASTEXITCODE" }
-
-Write-Host 'Building APK resources and manifest...'
-if ($apktoolCommand) {
-    & $apktoolCommand.Source b $apktoolSource -o $unsignedApk
+$gradle = Join-Path $projectRoot 'gradlew.bat'
+$localProperties = Join-Path $projectRoot 'local.properties'
+$buildRoot = Join-Path $projectRoot $(if ($NoHud) { 'build-nohud' } else { 'build' })
+$signedApk = Join-Path $buildRoot $(if ($NoHud) {
+    'exeed-awd-display-nohud.apk'
 } else {
-    & $java -jar $apktoolJar b $apktoolSource -o $unsignedApk
-}
-if ($LASTEXITCODE -ne 0) { throw "apktool failed: $LASTEXITCODE" }
+    'exeed-awd-display.apk'
+})
+$variant = if ($NoHud) { 'NohudDebug' } else { 'HudDebug' }
+$gradleApk = Join-Path $projectRoot $(if ($NoHud) {
+    'app\build\outputs\apk\nohud\debug\app-nohud-debug.apk'
+} else {
+    'app\build\outputs\apk\hud\debug\app-hud-debug.apk'
+})
 
-Push-Location $dexDir
-try {
-    & $jar uf $unsignedApk 'classes.dex'
-    if ($LASTEXITCODE -ne 0) { throw "classes.dex insertion failed: $LASTEXITCODE" }
-} finally {
-    Pop-Location
+if (-not (Test-Path -LiteralPath $gradle)) {
+    throw "Gradle wrapper not found: $gradle"
+}
+$mapKitConfigured = (Test-Path -LiteralPath $localProperties) -and
+        (Select-String -LiteralPath $localProperties `
+        -Pattern '^MAPKIT_API_KEY=.+$' -Quiet)
+if (-not $mapKitConfigured) {
+    throw 'MAPKIT_API_KEY is missing from local.properties.'
 }
 
-$keyDir = Split-Path -Parent $keystore
-New-Item -ItemType Directory -Force -Path $keyDir | Out-Null
+$jdkHome = $null
+if ($env:JAVA_HOME -and (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin\java.exe'))) {
+    $versionText = & (Join-Path $env:JAVA_HOME 'bin\java.exe') -version 2>&1 | Out-String
+    if ($versionText -match 'version "(\d+)' -and [int]$Matches[1] -ge 21) {
+        $jdkHome = $env:JAVA_HOME
+    }
+}
+if (-not $jdkHome) {
+    $jdkHome = Get-ChildItem 'C:\Program Files\Microsoft' -Directory `
+            -Filter 'jdk-21*' -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $jdkHome) {
+    throw 'JDK 21 is required by Yandex MapKit 4.42. Install JDK 21 or set JAVA_HOME.'
+}
+
+$env:JAVA_HOME = $jdkHome
+$env:Path = (Join-Path $jdkHome 'bin') + ';' + $env:Path
+
+$keystore = Join-Path $projectRoot '.debug\debug.keystore'
 if (-not (Test-Path -LiteralPath $keystore)) {
-    Write-Host 'Creating local debug signing key...'
-    & $keytool -genkeypair -noprompt -keystore $keystore -storepass android `
-        -alias androiddebugkey -keypass android -dname 'CN=Android Debug,O=Android,C=US' `
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $keystore) | Out-Null
+    & (Join-Path $jdkHome 'bin\keytool.exe') -genkeypair -noprompt `
+        -keystore $keystore -storepass android -alias androiddebugkey `
+        -keypass android -dname 'CN=Android Debug,O=Android,C=US' `
         -keyalg RSA -keysize 2048 -validity 10000
     if ($LASTEXITCODE -ne 0) { throw "keytool failed: $LASTEXITCODE" }
 }
 
-Copy-Item -LiteralPath $unsignedApk -Destination $signedApk
-Write-Host 'Signing APK...'
-& $jarsigner -keystore $keystore -storepass android -keypass android `
-    -sigalg SHA256withRSA -digestalg SHA-256 $signedApk androiddebugkey
-if ($LASTEXITCODE -ne 0) { throw "jarsigner failed: $LASTEXITCODE" }
+Write-Host "Building $variant with Yandex MapKit..."
+& $gradle ":app:assemble$variant"
+if ($LASTEXITCODE -ne 0) { throw "Gradle failed: $LASTEXITCODE" }
+if (-not (Test-Path -LiteralPath $gradleApk)) {
+    throw "Gradle APK not found: $gradleApk"
+}
 
-& $jarsigner -verify $signedApk
-if ($LASTEXITCODE -ne 0) { throw "signature verification failed: $LASTEXITCODE" }
+New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
+Copy-Item -LiteralPath $gradleApk -Destination $signedApk -Force
 
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $signedApk).Hash
 Write-Host "Built: $signedApk"

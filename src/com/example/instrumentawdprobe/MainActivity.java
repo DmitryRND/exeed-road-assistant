@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.ServiceConnection;
+import android.content.res.AssetFileDescriptor;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -29,6 +30,7 @@ import android.media.AudioFocusRequest;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
+import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -56,10 +58,8 @@ import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 
-import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.IOException;
 import java.lang.reflect.InvocationHandler;
@@ -70,8 +70,6 @@ import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.URL;
 import java.util.Arrays;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 /** Read-only probe for instrument Display 2 and the stock AWD energy-flow signals. */
 public final class MainActivity extends Activity {
@@ -98,9 +96,6 @@ public final class MainActivity extends Activity {
     private static final long CAMERA_LOCATION_STALE_MS = 10000L;
     private static final long CAMERA_LOCATION_WATCHDOG_MS = 2000L;
     private static final String CAMERA_DATABASE_ASSET = "hud_speed.txt";
-    private static final String OFFICIAL_CAMERA_DATABASE_ASSET = "official_speedcam.txt";
-    private static final int OFFICIAL_CAMERA_COUNT = 2729;
-    private static final String OFFICIAL_CAMERA_REGIONS = "23/26/61/62/66";
     private static final String CAMERA_DATABASE_FILE = "hud_speed.txt";
     private static final String CAMERA_DATABASE_URL =
             "https://dwn.jcartools.ru/arad/h_ru.zip";
@@ -109,7 +104,19 @@ public final class MainActivity extends Activity {
     private static final long MAX_CAMERA_TEXT_BYTES = 25L * 1024L * 1024L;
     private static final int MIN_PRIMARY_CAMERA_COUNT = 50000;
     private static final String[] CAMERA_SOUND_NAMES = {
-            "Мягкий аккорд", "Навигационная мелодия", "Короткий сигнал"
+            "Мягкий аккорд", "Плавная мелодия", "Мягкий короткий сигнал",
+            "ICQ — Oh-oh", "Эпическое уведомление", "Портал — гул",
+            "Древние слова — шёпот"
+    };
+    private static final String[] CAMERA_SOUND_ASSETS = {
+            null, null, null,
+            "camera_sounds/icq-oh-oh.mp3",
+            "camera_sounds/epic-contact.mp3",
+            "camera_sounds/portal-hum.mp3",
+            "camera_sounds/ancient-whisper.mp3"
+    };
+    private static final float[] CAMERA_SOUND_VOLUMES = {
+            1f, 1f, 1f, 0.42f, 0.68f, 0.34f, 0.68f
     };
     private static final String[] CAMERA_WARNING_MODE_NAMES = {
             "Всегда", "Только при превышении скорости"
@@ -118,11 +125,12 @@ public final class MainActivity extends Activity {
     private static final int CAMERA_WARNING_OVERSPEED = 1;
     private static final float OVERSPEED_ACTIVATION_MARGIN_KMH = 2f;
     private static final String[] IDLE_MODE_NAMES = {
-            "Авто", "Полный привод", "Радар"
+            "Авто", "Полный привод", "Радар", "Карта"
     };
     private static final int IDLE_MODE_AUTO = 0;
     private static final int IDLE_MODE_AWD = 1;
     private static final int IDLE_MODE_RADAR = 2;
+    private static final int IDLE_MODE_MAP = 3;
 
     private static final String IPK_PACKAGE = "com.neusoft.ipkservice";
     private static final String IPK_SERVICE =
@@ -135,6 +143,8 @@ public final class MainActivity extends Activity {
     private static final int PROP_ESTIMATED_COUPLING_TORQUE = 560992876;
     private static final int PROP_ENGINE_WHEEL_TORQUE_RATIO = 560992877;
     private static final int PROP_MEAN_EFFECTIVE_TORQUE = 560992878;
+    private static final int PROP_HUD_DISTANCE_TO_DESTINATION = 560992986;
+    private static final int PROP_HUD_DISTANCE_TO_JUNCTION = 560992987;
     private static final int PROP_ENGINE_STATE = 557847175;
     private static final int PROP_LEVER_MODE = 557847156;
     private static final int[] AWD_PROPERTIES = {
@@ -157,11 +167,14 @@ public final class MainActivity extends Activity {
     private Spinner cameraWarningModeSpinner;
     private TextView cameraDistanceView;
     private TextView cameraDatabaseView;
+    private TextView batteryInfoView;
     private Button cameraUpdateButton;
     private AwdPresentation presentation;
     private WindowManager overlayWindowManager;
     private View overlayRoot;
+    private FrameLayout overlayContentRoot;
     private AwdView overlayView;
+    private InstrumentMapSurfaceView overlayMapView;
     private Object car;
     private Object vendorManager;
     private Object vendorCallback;
@@ -182,10 +195,13 @@ public final class MainActivity extends Activity {
     private AudioManager alertAudioManager;
     private AudioFocusRequest alertFocusRequest;
     private AudioTrack alertAudioTrack;
+    private MediaPlayer alertMediaPlayer;
     private boolean demoAlertActive;
     private boolean hudCameraActive;
+    private Boolean hudOutputAvailable;
     private int lastHudCameraDistance = -1;
     private long lastHudCameraUpdateMs;
+    private int hudDistanceOverrideGeneration;
 
     private int rawEstimatedCouplingTorque = -1;
     private int rawEngineWheelTorqueRatio = -1;
@@ -300,6 +316,7 @@ public final class MainActivity extends Activity {
                 new IntentFilter(CameraLocationService.ACTION_LOCATION_UPDATE));
         locationReceiverRegistered = true;
         buildControlUi();
+        refreshBatteryInfo();
         loadCameraDatabaseAsync(false);
         handleControlIntent(getIntent());
         if (getIntent().getBooleanExtra("boot_autostart", false)) {
@@ -334,7 +351,7 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT));
 
         TextView notice = new TextView(this);
-        notice.setText("Радар дорожных камер и визуализация полного привода");
+        notice.setText("Камеры, карта и визуализация полного привода");
         notice.setTextColor(Color.rgb(104, 103, 98));
         notice.setTextSize(17f);
         notice.setGravity(Gravity.CENTER);
@@ -362,6 +379,21 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { disableAwdDisplay(); }
         });
         root.addView(disableButton, controlButtonParams());
+
+        batteryInfoView = new TextView(this);
+        batteryInfoView.setText("12 В: чтение…");
+        batteryInfoView.setTextSize(18f);
+        batteryInfoView.setTextColor(Color.rgb(52, 52, 50));
+        batteryInfoView.setGravity(Gravity.CENTER);
+        batteryInfoView.setPadding(0, dp(4), 0, dp(8));
+        root.addView(batteryInfoView, matchWrap());
+
+        Button batteryRefreshButton = createControlButton("Обновить данные батареи",
+                Color.rgb(116, 107, 95), Color.WHITE);
+        batteryRefreshButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { refreshBatteryInfo(); }
+        });
+        root.addView(batteryRefreshButton, controlButtonParams());
 
         final SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         autostartCheck = new CheckBox(this);
@@ -426,10 +458,18 @@ public final class MainActivity extends Activity {
         root.addView(cameraAudioCheck, matchWrap());
 
         cameraHudCheck = new CheckBox(this);
-        cameraHudCheck.setText("Предупреждения о камерах на HUD");
+        final boolean hudAvailable = isHudOutputAvailable();
+        if (!hudAvailable) {
+            preferences.edit().putBoolean(PREF_CAMERA_HUD, false).apply();
+        }
+        cameraHudCheck.setText(hudAvailable
+                ? "Предупреждения о камерах на HUD"
+                : "HUD отключён в этой сборке");
         cameraHudCheck.setTextSize(18f);
         cameraHudCheck.setTextColor(Color.rgb(52, 52, 50));
-        cameraHudCheck.setChecked(preferences.getBoolean(PREF_CAMERA_HUD, false));
+        cameraHudCheck.setChecked(hudAvailable
+                && preferences.getBoolean(PREF_CAMERA_HUD, false));
+        cameraHudCheck.setEnabled(hudAvailable);
         cameraHudCheck.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 boolean enabled = cameraHudCheck.isChecked();
@@ -546,6 +586,38 @@ public final class MainActivity extends Activity {
         return button;
     }
 
+    private void refreshBatteryInfo() {
+        if (batteryInfoView == null) return;
+        batteryInfoView.setText("12 В: чтение…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final BatteryRpcReader.Result result = BatteryRpcReader.read();
+                    Log.i(TAG, "BATTERY_RPC OK " + result.diagnosticText());
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (batteryInfoView != null) {
+                                batteryInfoView.setText(result.displayText());
+                            }
+                        }
+                    });
+                } catch (final Throwable error) {
+                    Log.e(TAG, "BATTERY_RPC ERROR", error);
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (batteryInfoView != null) {
+                                Throwable cause = error;
+                                while (cause.getCause() != null) cause = cause.getCause();
+                                batteryInfoView.setText("12 В: недоступно ("
+                                        + cause.getClass().getSimpleName() + ")");
+                            }
+                        }
+                    });
+                }
+            }
+        }, "BatteryRpcReader").start();
+    }
+
     private LinearLayout.LayoutParams controlButtonParams() {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(72));
@@ -563,7 +635,8 @@ public final class MainActivity extends Activity {
     private void handleControlIntent(Intent intent) {
         String action = intent == null ? null : intent.getAction();
         if (intent != null && intent.hasExtra("camera_hud_enabled")) {
-            boolean enabled = intent.getBooleanExtra("camera_hud_enabled", false);
+            boolean enabled = isHudOutputAvailable()
+                    && intent.getBooleanExtra("camera_hud_enabled", false);
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putBoolean(PREF_CAMERA_HUD, enabled).apply();
             if (cameraHudCheck != null) cameraHudCheck.setChecked(enabled);
@@ -776,10 +849,7 @@ public final class MainActivity extends Activity {
                                 "HUD Speed · встроенная");
                     }
                     final SpeedCameraIndex loaded = candidate;
-                    final String source = candidateSource
-                            + " \u00b7 \u0413\u0418\u0411\u0414\u0414 "
-                            + OFFICIAL_CAMERA_REGIONS + ": "
-                            + OFFICIAL_CAMERA_COUNT;
+                    final String source = candidateSource;
                     cameraIndex = loaded;
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
@@ -809,15 +879,10 @@ public final class MainActivity extends Activity {
     }
 
     private SpeedCameraIndex readCameraDatabase(InputStream input) throws IOException {
-        InputStream official = null;
         try {
-            official = getAssets().open(OFFICIAL_CAMERA_DATABASE_ASSET);
-            return SpeedCameraIndex.read(input, official);
+            return SpeedCameraIndex.read(input);
         } finally {
             try { input.close(); } catch (IOException ignored) { }
-            if (official != null) {
-                try { official.close(); } catch (IOException ignored) { }
-            }
         }
     }
 
@@ -840,20 +905,31 @@ public final class MainActivity extends Activity {
                     connection = (HttpURLConnection) new URL(CAMERA_DATABASE_URL).openConnection();
                     connection.setConnectTimeout(20000);
                     connection.setReadTimeout(90000);
-                    connection.setRequestProperty("User-Agent", "EXEED-Road-Assistant/2.1");
+                    connection.setRequestProperty("User-Agent", cameraUpdateUserAgent());
                     SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
                     String etag = preferences.getString(PREF_CAMERA_ETAG, null);
                     String lastModified = preferences.getString(
                             PREF_CAMERA_LAST_MODIFIED, null);
-                    if (etag != null && etag.length() > 0) {
-                        connection.setRequestProperty("If-None-Match", etag);
-                    }
-                    if (lastModified != null && lastModified.length() > 0) {
-                        connection.setRequestProperty("If-Modified-Since", lastModified);
+                    boolean conditionalRequest = hasUsableDownloadedCameraDatabase(
+                            cameraDatabaseFile());
+                    if (conditionalRequest) {
+                        if (etag != null && etag.length() > 0) {
+                            connection.setRequestProperty("If-None-Match", etag);
+                        }
+                        if (lastModified != null && lastModified.length() > 0) {
+                            connection.setRequestProperty("If-Modified-Since", lastModified);
+                        }
                     }
                     connection.connect();
                     int responseCode = connection.getResponseCode();
                     if (responseCode == HttpURLConnection.HTTP_NOT_MODIFIED) {
+                        if (!hasUsableDownloadedCameraDatabase(cameraDatabaseFile())) {
+                            preferences.edit()
+                                    .remove(PREF_CAMERA_ETAG)
+                                    .remove(PREF_CAMERA_LAST_MODIFIED)
+                                    .apply();
+                            throw new IOException("Сервер вернул 304, но локальная база недоступна");
+                        }
                         loadCameraDatabaseAsync(true);
                         return;
                     }
@@ -914,39 +990,31 @@ public final class MainActivity extends Activity {
 
     private void extractHudDatabase(InputStream networkInput, File target)
             throws IOException {
-        boolean found = false;
-        long extractedBytes = 0L;
-        try (ZipInputStream zip = new ZipInputStream(
-                new BufferedInputStream(networkInput))) {
-            ZipEntry entry;
-            while ((entry = zip.getNextEntry()) != null) {
-                String name = entry.getName().replace('\\', '/');
-                if (name.startsWith("/") || name.contains("../") || name.contains(":")) {
-                    throw new IOException("Небезопасное имя файла в архиве");
-                }
-                if (!entry.isDirectory() && CAMERA_DATABASE_ZIP_ENTRY.equals(name)) {
-                    if (found) throw new IOException("Повторяющийся файл базы в архиве");
-                    found = true;
-                    try (FileOutputStream output = new FileOutputStream(target)) {
-                        byte[] buffer = new byte[64 * 1024];
-                        int read;
-                        while ((read = zip.read(buffer)) >= 0) {
-                            if (read == 0) continue;
-                            extractedBytes += read;
-                            if (extractedBytes > MAX_CAMERA_TEXT_BYTES) {
-                                throw new IOException("Распакованная база слишком большая");
-                            }
-                            output.write(buffer, 0, read);
-                        }
-                        output.getFD().sync();
-                    }
-                }
-                zip.closeEntry();
+        CameraDatabaseUpdate.extractExactEntry(networkInput, target,
+                CAMERA_DATABASE_ZIP_ENTRY, MAX_CAMERA_ZIP_BYTES, MAX_CAMERA_TEXT_BYTES);
+    }
+
+    private boolean hasUsableDownloadedCameraDatabase(File file) {
+        if (file == null || !file.isFile()) return false;
+        try (InputStream input = new FileInputStream(file)) {
+            return SpeedCameraIndex.read(input).size() >= MIN_PRIMARY_CAMERA_COUNT;
+        } catch (Throwable error) {
+            Log.w(TAG, "Downloaded camera database is unavailable for conditional update", error);
+            return false;
+        }
+    }
+
+    private String cameraUpdateUserAgent() {
+        try {
+            String version = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0).versionName;
+            if (version != null && version.length() > 0) {
+                return "EXEED-Road-Assistant/" + version;
             }
+        } catch (Throwable error) {
+            Log.w(TAG, "Could not read app version for camera update", error);
         }
-        if (!found || extractedBytes == 0L || !target.isFile()) {
-            throw new IOException("В архиве отсутствует " + CAMERA_DATABASE_ZIP_ENTRY);
-        }
+        return "EXEED-Road-Assistant/unknown";
     }
 
     private String cameraUpdateErrorText(Throwable error) {
@@ -964,22 +1032,8 @@ public final class MainActivity extends Activity {
     }
 
     private void replaceCameraDatabase(File temporary) throws IOException {
-        File target = cameraDatabaseFile();
-        File backup = cameraDatabaseBackupFile();
-        if (backup.exists() && !backup.delete()) {
-            throw new IOException("Не удалось очистить резервную копию базы");
-        }
-        boolean backedUp = target.exists();
-        if (backedUp && !target.renameTo(backup)) {
-            throw new IOException("Не удалось создать резервную копию базы");
-        }
-        if (!temporary.renameTo(target)) {
-            if (backedUp && backup.exists() && !backup.renameTo(target)) {
-                Log.e(TAG, "Camera database rollback failed");
-            }
-            throw new IOException("Не удалось сохранить новую базу");
-        }
-        // Keep the previous validated database for rollback on the next launch.
+        CameraDatabaseUpdate.replaceKeepingBackup(temporary,
+                cameraDatabaseFile(), cameraDatabaseBackupFile());
     }
 
     private void startCameraMonitoring() {
@@ -1112,15 +1166,6 @@ public final class MainActivity extends Activity {
             float bearingToCamera = SpeedCameraIndex.bearingDegrees(
                     location.getLatitude(), location.getLongitude(),
                     activeCamera.latitude, activeCamera.longitude);
-            boolean stillOnTravelPath = !hasCourse || SpeedCameraIndex.matchesTravelPath(
-                    activeCamera, course, bearingToCamera, distance);
-            if (!stillOnTravelPath) {
-                append("Camera alert cleared outside travel path: id=" + activeCamera.id
-                        + " course=" + Math.round(course)
-                        + " bearing=" + Math.round(bearingToCamera));
-                clearActiveCamera();
-                return;
-            }
             boolean behind = hasCourse
                     && SpeedCameraIndex.angleDifference(course, bearingToCamera) > 105f;
             boolean passed = SpeedCameraIndex.hasPassedCamera(
@@ -1130,6 +1175,20 @@ public final class MainActivity extends Activity {
                         + " minimum=" + Math.round(activeMinimumDistance)
                         + " m current=" + Math.round(distance) + " m");
                 lastPassedCamera = activeCamera;
+                clearActiveCamera();
+                return;
+            }
+            // Keep tracking a camera briefly after it moves behind us. Otherwise
+            // matchesTravelPath() clears it first and a nearby duplicate can be
+            // acquired immediately without recording the physical camera as passed.
+            boolean justBehindCamera = behind && activeMinimumDistance < 170f && distance <= 30f;
+            boolean stillOnTravelPath = !hasCourse || justBehindCamera
+                    || SpeedCameraIndex.matchesTravelPath(
+                    activeCamera, course, bearingToCamera, distance);
+            if (!stillOnTravelPath) {
+                append("Camera alert cleared outside travel path: id=" + activeCamera.id
+                        + " course=" + Math.round(course)
+                        + " bearing=" + Math.round(bearingToCamera));
                 clearActiveCamera();
                 return;
             }
@@ -1159,7 +1218,8 @@ public final class MainActivity extends Activity {
         SpeedCameraIndex.Match match = hasCourse ? index.findNearest(
                 location, course, true, warningDistance) : null;
         if (match != null && (lastPassedCamera == null
-                || match.camera.id != lastPassedCamera.id)
+                || !SpeedCameraIndex.areSameWarningZone(
+                match.camera, lastPassedCamera))
                 && shouldShowSpeedCamera(match.camera, location, false)) {
             activeCamera = match.camera;
             activeMinimumDistance = match.distanceMeters;
@@ -1218,7 +1278,8 @@ public final class MainActivity extends Activity {
     }
 
     private void sendCameraHudAlert(SpeedCamera camera, int distanceMeters) {
-        if (!getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (!isHudOutputAvailable()
+                || !getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getBoolean(PREF_CAMERA_HUD, false)) return;
         long now = SystemClock.elapsedRealtime();
         if (hudCameraActive
@@ -1228,26 +1289,27 @@ public final class MainActivity extends Activity {
         hud.setComponent(new ComponentName(
                 "com.telenav.app.arp", "com.telenav.app.receiver.BootReceiver"));
         hud.putExtra("mode", "LEGACY");
-        String hudText = camera != null && camera.speed > 0
-                ? "Камера " + camera.speed + " км/ч" : "Камера";
+        String hudText = camera == null ? "Камера" : camera.hudLabel();
         hud.putExtra("street", hudText);
         // Physically verified on TXL2: TeleNav maneuver 23 is translated by
         // ExtraService to raw HUD status 31 (toll booth), used as camera icon.
         hud.putExtra("turn", 23);
         hud.putExtra("distance", distanceMeters);
-        // Zero suppresses a misleading second camera distance by the finish flag.
-        hud.putExtra("destDistance", 0);
+        // Treat the camera as the temporary destination so the finish distance is meaningful.
+        hud.putExtra("destDistance", distanceMeters);
         hud.putExtra("intervalMs", 1000L);
         sendBroadcast(hud);
         hudCameraActive = true;
         lastHudCameraDistance = distanceMeters;
         lastHudCameraUpdateMs = now;
+        scheduleHudMetricDistanceOverride(distanceMeters);
         Log.i(TAG, "HUD camera alert: icon=toll_booth telenav=23 raw=31 text='" + hudText
                 + "' distance=" + distanceMeters + " m");
     }
 
     private void clearCameraHudAlert() {
         if (!hudCameraActive) return;
+        hudDistanceOverrideGeneration++;
         Intent stop = new Intent("com.telenav.app.START");
         stop.setComponent(new ComponentName(
                 "com.telenav.app.arp", "com.telenav.app.receiver.BootReceiver"));
@@ -1257,6 +1319,53 @@ public final class MainActivity extends Activity {
         lastHudCameraDistance = -1;
         lastHudCameraUpdateMs = 0L;
         Log.i(TAG, "HUD camera alert cleared");
+    }
+
+    private boolean isHudOutputAvailable() {
+        if (hudOutputAvailable != null) return hudOutputAvailable.booleanValue();
+        try {
+            InputStream marker = getAssets().open("hud_output_disabled");
+            marker.close();
+            hudOutputAvailable = Boolean.FALSE;
+        } catch (IOException markerMissing) {
+            hudOutputAvailable = Boolean.TRUE;
+        }
+        return hudOutputAvailable.booleanValue();
+    }
+
+    private void scheduleHudMetricDistanceOverride(final int distanceMeters) {
+        final int generation = ++hudDistanceOverrideGeneration;
+        // ExtraService writes unit=0 because its TeleNav adapter discards formattedDistance.
+        // Rewrite after its callback using the documented HUD unit code 1 (metres).
+        long[] delaysMs = {120L, 420L};
+        for (final long delayMs : delaysMs) {
+            overlayHandler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (!hudCameraActive || generation != hudDistanceOverrideGeneration) return;
+                    writeHudMetricDistances(distanceMeters);
+                }
+            }, delayMs);
+        }
+    }
+
+    private void writeHudMetricDistances(int distanceMeters) {
+        Object manager = vendorManager;
+        if (manager == null) {
+            Log.w(TAG, "HUD metric distance override skipped: vendor_extension is not ready");
+            return;
+        }
+        byte[] frame = HudDistanceEncoder.encodeMeters(distanceMeters);
+        try {
+            Method setProperty = manager.getClass().getMethod(
+                    "setProperty", Class.class, int.class, int.class, Object.class);
+            setProperty.invoke(manager, byte[].class,
+                    PROP_HUD_DISTANCE_TO_DESTINATION, 0, frame.clone());
+            setProperty.invoke(manager, byte[].class,
+                    PROP_HUD_DISTANCE_TO_JUNCTION, 0, frame.clone());
+            Log.d(TAG, "HUD metric distances written: " + distanceMeters + " m");
+        } catch (Throwable error) {
+            Log.w(TAG, "HUD metric distance override failed", error);
+        }
     }
 
     private void playCameraAlert() {
@@ -1275,7 +1384,11 @@ public final class MainActivity extends Activity {
             int soundStyle = Math.max(0, Math.min(CAMERA_SOUND_NAMES.length - 1,
                     getSharedPreferences(PREFS, MODE_PRIVATE)
                             .getInt(PREF_CAMERA_SOUND, 0)));
-            byte[] pcm = createAlertPcm(sampleRate, soundStyle);
+            if (CAMERA_SOUND_ASSETS[soundStyle] != null) {
+                playPackagedCameraAlert(soundStyle, attributes, focusResult);
+                return;
+            }
+            byte[] pcm = AlertSoundGenerator.createPcm(sampleRate, soundStyle);
             AudioFormat format = new AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setSampleRate(sampleRate)
@@ -1316,10 +1429,55 @@ public final class MainActivity extends Activity {
                     }
                 }
             }, "CameraAlertAudio").start();
-            overlayHandler.postDelayed(releaseAlertAudio, 1450L);
+            overlayHandler.postDelayed(releaseAlertAudio, 1650L);
         } catch (Throwable error) {
             appendFailure("Navigation alert sound failed", error);
             releaseAlertSound();
+        }
+    }
+
+    private void playPackagedCameraAlert(final int soundStyle,
+                                         AudioAttributes attributes,
+                                         int focusResult) throws IOException {
+        final MediaPlayer player = new MediaPlayer();
+        alertMediaPlayer = player;
+        try (AssetFileDescriptor asset = getAssets().openFd(
+                CAMERA_SOUND_ASSETS[soundStyle])) {
+            player.setAudioAttributes(attributes);
+            player.setDataSource(asset.getFileDescriptor(),
+                    asset.getStartOffset(), asset.getLength());
+            float volume = CAMERA_SOUND_VOLUMES[soundStyle];
+            player.setVolume(volume, volume);
+            player.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                @Override public void onCompletion(MediaPlayer completed) {
+                    if (alertMediaPlayer == completed) releaseAlertSound();
+                }
+            });
+            player.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                @Override public boolean onError(MediaPlayer failed, int what, int extra) {
+                    Log.e(TAG, "Packaged camera alert failed: what=" + what
+                            + " extra=" + extra);
+                    if (alertMediaPlayer == failed) releaseAlertSound();
+                    return true;
+                }
+            });
+            player.prepare();
+            int durationMs = Math.max(1, player.getDuration());
+            player.start();
+            append("Navigation alert asset started: focus=" + focusResult
+                    + " duration=" + durationMs
+                    + " volume=" + volume
+                    + " style=" + CAMERA_SOUND_NAMES[soundStyle]);
+            overlayHandler.postDelayed(releaseAlertAudio,
+                    Math.max(1000L, durationMs + 300L));
+        } catch (IOException error) {
+            try { player.release(); } catch (Throwable ignored) { }
+            if (alertMediaPlayer == player) alertMediaPlayer = null;
+            throw error;
+        } catch (RuntimeException error) {
+            try { player.release(); } catch (Throwable ignored) { }
+            if (alertMediaPlayer == player) alertMediaPlayer = null;
+            throw error;
         }
     }
 
@@ -1339,69 +1497,17 @@ public final class MainActivity extends Activity {
                 AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
     }
 
-    private byte[] createAlertPcm(int sampleRate, int soundStyle) {
-        final int totalMs = 1200;
-        int sampleCount = sampleRate * totalMs / 1000;
-        byte[] pcm = new byte[sampleCount * 4];
-        for (int index = 0; index < sampleCount; index++) {
-            float timeMs = index * 1000f / sampleRate;
-            double sample;
-            if (soundStyle == 1) {
-                // Three rising notes: clear enough for navigation, but not alarm-like.
-                sample = melodicTone(timeMs, index, sampleRate,
-                        90f, 330f, 659.25f, 28f, 70f) * 0.42
-                        + melodicTone(timeMs, index, sampleRate,
-                        350f, 610f, 830.61f, 28f, 75f) * 0.40
-                        + melodicTone(timeMs, index, sampleRate,
-                        630f, 980f, 987.77f, 32f, 120f) * 0.39;
-            } else if (soundStyle == 2) {
-                // Compact two-note cue for drivers who prefer the shortest warning.
-                sample = melodicTone(timeMs, index, sampleRate,
-                        150f, 390f, 783.99f, 20f, 55f) * 0.44
-                        + melodicTone(timeMs, index, sampleRate,
-                        510f, 790f, 987.77f, 22f, 70f) * 0.44;
-            } else {
-                // Soft major chord with a small resolving shimmer.
-                sample = melodicTone(timeMs, index, sampleRate,
-                        100f, 720f, 523.25f, 55f, 190f) * 0.25
-                        + melodicTone(timeMs, index, sampleRate,
-                        120f, 760f, 659.25f, 60f, 210f) * 0.20
-                        + melodicTone(timeMs, index, sampleRate,
-                        145f, 800f, 783.99f, 65f, 230f) * 0.15
-                        + melodicTone(timeMs, index, sampleRate,
-                        690f, 1060f, 1046.50f, 45f, 150f) * 0.16;
-            }
-            sample = Math.max(-0.92, Math.min(0.92, sample));
-            short value = (short) (Short.MAX_VALUE * sample);
-            int offset = index * 4;
-            pcm[offset] = (byte) (value & 0xff);
-            pcm[offset + 1] = (byte) ((value >> 8) & 0xff);
-            pcm[offset + 2] = pcm[offset];
-            pcm[offset + 3] = pcm[offset + 1];
-        }
-        return pcm;
-    }
-
-    private double melodicTone(float timeMs, int sampleIndex, int sampleRate,
-                               float startMs, float endMs, float frequency,
-                               float attackMs, float releaseMs) {
-        if (timeMs < startMs || timeMs >= endMs) return 0.0;
-        float position = timeMs - startMs;
-        float remaining = endMs - timeMs;
-        float envelope = Math.min(1f,
-                Math.min(position / attackMs, remaining / releaseMs));
-        // Smooth the linear envelope so every note starts and ends without a click.
-        envelope = envelope * envelope * (3f - 2f * envelope);
-        return envelope * Math.sin(2.0 * Math.PI * frequency
-                * sampleIndex / sampleRate);
-    }
-
     private void releaseAlertSound() {
         overlayHandler.removeCallbacks(releaseAlertAudio);
         if (alertAudioTrack != null) {
             try { alertAudioTrack.stop(); } catch (Throwable ignored) { }
             try { alertAudioTrack.release(); } catch (Throwable ignored) { }
             alertAudioTrack = null;
+        }
+        if (alertMediaPlayer != null) {
+            try { alertMediaPlayer.stop(); } catch (Throwable ignored) { }
+            try { alertMediaPlayer.release(); } catch (Throwable ignored) { }
+            alertMediaPlayer = null;
         }
         if (alertAudioManager != null) {
             try {
@@ -1567,20 +1673,30 @@ public final class MainActivity extends Activity {
                 overlayView.updateCameraAlert(activeCamera, distance);
             }
 
+            overlayContentRoot = new FrameLayout(displayContext);
+            overlayContentRoot.setBackgroundColor(Color.TRANSPARENT);
+            overlayContentRoot.addView(overlayView, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            updateInstrumentMapMode();
+
             if (fullScreen) {
                 FrameLayout root = new FrameLayout(displayContext);
                 root.setBackgroundColor(Color.TRANSPARENT);
                 FrameLayout.LayoutParams miniMapParams = new FrameLayout.LayoutParams(
                         637, 637, Gravity.TOP | Gravity.RIGHT);
-                root.addView(overlayView, miniMapParams);
+                root.addView(overlayContentRoot, miniMapParams);
                 overlayRoot = root;
             } else {
-                overlayRoot = overlayView;
+                overlayRoot = overlayContentRoot;
             }
 
+            int requestedWindowType = shouldShowMapIdle()
+                    ? WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY
+                    : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                     fullScreen ? 1920 : 637, fullScreen ? 720 : 637,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    requestedWindowType,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                             | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
@@ -1589,14 +1705,30 @@ public final class MainActivity extends Activity {
             params.x = 0;
             params.y = 0;
             params.setTitle("InstrumentAwdOverlay");
-            overlayWindowManager.addView(overlayRoot, params);
+            try {
+                overlayWindowManager.addView(overlayRoot, params);
+            } catch (RuntimeException systemOverlayDenied) {
+                if (requestedWindowType != WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY) {
+                    throw systemOverlayDenied;
+                }
+                Log.w(TAG, "TYPE_SYSTEM_OVERLAY denied; falling back to APPLICATION_OVERLAY",
+                        systemOverlayDenied);
+                try {
+                    overlayWindowManager.removeViewImmediate(overlayRoot);
+                } catch (RuntimeException cleanupError) {
+                    Log.d(TAG, "Rejected SYSTEM_OVERLAY cleanup was unnecessary", cleanupError);
+                }
+                params.type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+                overlayWindowManager.addView(overlayRoot, params);
+                append("Instrument map: SYSTEM_OVERLAY denied, APPLICATION_OVERLAY fallback used");
+            }
             overlayHandler.removeCallbacks(overlayTimeout);
             if (!liveFullOverlay) {
                 overlayHandler.postDelayed(overlayTimeout, fullScreen ? 8000L : 15000L);
             }
-            append("AWD overlay added: displayId=" + display.getDisplayId()
+            append("Instrument overlay added: displayId=" + display.getDisplayId()
                     + (fullScreen
-                    ? " root=(0,0) 1920x720; AWD child=(1283,0) 637x637; "
+                    ? " root=(0,0) 1920x720; content child=(1283,0) 637x637; "
                     + (liveFullOverlay ? "live until explicit stop" : "automatic removal in 8 seconds")
                     : " rect=(1283,0) 637x637; automatic removal in 15 seconds"));
             updateControlUi(true, "Включено");
@@ -1609,6 +1741,11 @@ public final class MainActivity extends Activity {
 
     private void dismissInstrumentOverlay() {
         overlayHandler.removeCallbacks(overlayTimeout);
+        if (overlayMapView != null && overlayContentRoot != null) {
+            try { overlayContentRoot.removeView(overlayMapView); }
+            catch (Throwable error) { Log.w(TAG, "Map surface removal failed", error); }
+        }
+        overlayMapView = null;
         if (overlayRoot != null && overlayWindowManager != null) {
             try {
                 overlayWindowManager.removeView(overlayRoot);
@@ -1618,6 +1755,7 @@ public final class MainActivity extends Activity {
             }
         }
         overlayRoot = null;
+        overlayContentRoot = null;
         overlayView = null;
         overlayWindowManager = null;
     }
@@ -1832,14 +1970,43 @@ public final class MainActivity extends Activity {
         int mode = getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getInt(PREF_IDLE_MODE, IDLE_MODE_AUTO);
         if (mode == IDLE_MODE_RADAR) return true;
-        if (mode == IDLE_MODE_AWD) return false;
+        if (mode == IDLE_MODE_AWD || mode == IDLE_MODE_MAP) return false;
         return !hasAwdSignalData();
+    }
+
+    private boolean shouldShowMapIdle() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getInt(PREF_IDLE_MODE, IDLE_MODE_AUTO) == IDLE_MODE_MAP;
     }
 
     private void updateOverlayIdleMode() {
         boolean radarIdle = shouldShowRadarIdle();
         if (overlayView != null) overlayView.setRadarIdle(radarIdle);
         if (presentation != null) presentation.setRadarIdle(radarIdle);
+        updateInstrumentMapMode();
+    }
+
+    private void updateInstrumentMapMode() {
+        if (overlayContentRoot == null || overlayView == null) return;
+        boolean mapRequested = shouldShowMapIdle();
+        boolean mapEnabled = mapRequested && RoadAssistantApplication.hasMapKitApiKey();
+        overlayView.setMapIdle(mapEnabled);
+        if (mapEnabled && overlayMapView == null) {
+            overlayMapView = new InstrumentMapSurfaceView(overlayContentRoot.getContext());
+            // Keep the map centred on the original instrument card while giving
+            // it substantially more room in both directions.
+            FrameLayout.LayoutParams mapParams = new FrameLayout.LayoutParams(637, 500);
+            mapParams.leftMargin = 0;
+            mapParams.topMargin = 0;
+            overlayContentRoot.addView(overlayMapView, 0, mapParams);
+            append("Instrument mode: Yandex map 637x500 opaque top surface");
+        } else if (!mapEnabled && overlayMapView != null) {
+            overlayContentRoot.removeView(overlayMapView);
+            overlayMapView = null;
+        }
+        if (mapRequested && !mapEnabled) {
+            append("Instrument map is unavailable: MAPKIT_API_KEY is missing");
+        }
     }
 
     private String valueText(Object value) {
@@ -1932,6 +2099,8 @@ public final class MainActivity extends Activity {
     }
 
     private static final class AwdView extends View {
+        private static final long ALERT_FADE_IN_MS = 380L;
+        private static final long ALERT_FADE_OUT_MS = 520L;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private float targetFrontAxle;
         private float targetRearAxle;
@@ -1941,7 +2110,10 @@ public final class MainActivity extends Activity {
         private String details = "ожидание сигналов";
         private SpeedCamera alertCamera;
         private float alertDistanceMeters;
+        private long alertFadeInStartedAtMs;
+        private long alertFadeOutStartedAtMs;
         private boolean radarIdle;
+        private boolean mapIdle;
 
         AwdView(Context context) {
             super(context);
@@ -1963,17 +2135,28 @@ public final class MainActivity extends Activity {
             postInvalidateOnAnimation();
         }
 
+        void setMapIdle(boolean mapIdle) {
+            if (this.mapIdle == mapIdle) return;
+            this.mapIdle = mapIdle;
+            lastFrameTimeMs = 0L;
+            postInvalidateOnAnimation();
+        }
+
         void updateCameraAlert(SpeedCamera camera, float distanceMeters) {
+            boolean startFadeIn = alertCamera == null
+                    || alertCamera.id != camera.id
+                    || alertFadeOutStartedAtMs > 0L;
             alertCamera = camera;
             alertDistanceMeters = Math.max(0f, distanceMeters);
-            invalidate();
+            if (startFadeIn) alertFadeInStartedAtMs = SystemClock.uptimeMillis();
+            alertFadeOutStartedAtMs = 0L;
+            postInvalidateOnAnimation();
         }
 
         void clearCameraAlert() {
-            alertCamera = null;
-            alertDistanceMeters = 0f;
-            lastFrameTimeMs = 0L;
-            invalidate();
+            if (alertCamera == null || alertFadeOutStartedAtMs > 0L) return;
+            alertFadeOutStartedAtMs = SystemClock.uptimeMillis();
+            postInvalidateOnAnimation();
         }
 
         @Override protected void onDraw(Canvas canvas) {
@@ -1992,17 +2175,55 @@ public final class MainActivity extends Activity {
             float scale = Math.max(0.75f, Math.min(w, h) / 637f);
 
             RectF panel = new RectF(w * 0.405f, h * 0.13f, w * 0.84f, h * 0.61f);
-            paint.clearShadowLayer();
-            paint.setShader(null);
-            paint.setAlpha(255);
-            paint.setPathEffect(null);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.argb(238, 9, 10, 9));
-            canvas.drawRoundRect(panel, w * 0.04f, w * 0.04f, paint);
+            if (mapIdle && alertCamera == null) return;
+            // Keep the normal AWD visualization open over the stock cluster background.
+            // Camera and radar states retain a dark panel for text/icon readability.
+            if (alertCamera != null || radarIdle) {
+                paint.clearShadowLayer();
+                paint.setShader(null);
+                paint.setAlpha(255);
+                paint.setPathEffect(null);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(Color.argb(238, 9, 10, 9));
+                canvas.drawRoundRect(panel, w * 0.04f, w * 0.04f, paint);
+            }
 
             if (alertCamera != null) {
-                drawCameraAlert(canvas, panel, alertCamera, alertDistanceMeters, scale);
-                return;
+                float alertAlpha;
+                boolean transitionRunning;
+                if (alertFadeOutStartedAtMs > 0L) {
+                    float progress = Math.min(1f,
+                            (frameTimeMs - alertFadeOutStartedAtMs) / (float) ALERT_FADE_OUT_MS);
+                    alertAlpha = 1f - smoothStep(progress);
+                    transitionRunning = progress < 1f;
+                    if (!transitionRunning) {
+                        alertCamera = null;
+                        alertDistanceMeters = 0f;
+                        alertFadeInStartedAtMs = 0L;
+                        alertFadeOutStartedAtMs = 0L;
+                        lastFrameTimeMs = 0L;
+                        postInvalidateOnAnimation();
+                    }
+                } else {
+                    float progress = alertFadeInStartedAtMs <= 0L ? 1f : Math.min(1f,
+                            (frameTimeMs - alertFadeInStartedAtMs) / (float) ALERT_FADE_IN_MS);
+                    alertAlpha = smoothStep(progress);
+                    transitionRunning = progress < 1f;
+                }
+
+                if (alertCamera != null && alertAlpha > 0f) {
+                    int layerAlpha = Math.max(0, Math.min(255,
+                            Math.round(alertAlpha * 255f)));
+                    float transitionScale = 0.975f + alertAlpha * 0.025f;
+                    canvas.saveLayerAlpha(panel, layerAlpha);
+                    canvas.scale(transitionScale, transitionScale,
+                            panel.centerX(), panel.centerY());
+                    drawCameraAlert(canvas, panel, alertCamera,
+                            alertDistanceMeters, scale);
+                    canvas.restore();
+                    if (transitionRunning) postInvalidateOnAnimation();
+                    return;
+                }
             }
 
             if (radarIdle) {
@@ -2229,6 +2450,11 @@ public final class MainActivity extends Activity {
             float blend = 1f - (float) Math.exp(-deltaSeconds / timeConstant);
             float result = current + (target - current) * blend;
             return Math.abs(target - result) < 0.03f ? target : result;
+        }
+
+        private float smoothStep(float value) {
+            float clamped = Math.max(0f, Math.min(1f, value));
+            return clamped * clamped * (3f - 2f * clamped);
         }
 
         private void drawDriveLine(Canvas canvas, float x1, float y1, float x2, float y2,

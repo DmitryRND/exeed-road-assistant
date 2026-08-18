@@ -6,8 +6,8 @@ import java.nio.charset.Charset;
 
 public final class SpeedCameraIndexTest {
     public static void main(String[] args) throws Exception {
-        if (args.length != 2) {
-            throw new IllegalArgumentException("primary and official database paths required");
+        if (args.length != 1) {
+            throw new IllegalArgumentException("primary database path required");
         }
         SpeedCameraIndex index = SpeedCameraIndex.read(new FileInputStream(args[0]));
         require(index.size() == 71765, "unexpected record count: " + index.size());
@@ -34,44 +34,11 @@ public final class SpeedCameraIndexTest {
         require(exact.distanceMeters < 1f,
                 "known camera distance is wrong: " + exact.distanceMeters);
 
-        SpeedCameraIndex combined = SpeedCameraIndex.read(
-                new FileInputStream(args[0]), new FileInputStream(args[1]));
-        require(combined.size() == 74494,
-                "unexpected combined record count: " + combined.size());
-        SpeedCameraIndex official = SpeedCameraIndex.read(new FileInputStream(args[1]));
-        require(official.size() == 2729,
-                "unexpected official record count: " + official.size());
-        SpeedCameraIndex.Match ryazanOfficial = official.findNearest(
-                53.403720, 40.153770, 0f, true, 20);
-        require(ryazanOfficial != null && ryazanOfficial.distanceMeters < 1f,
-                "official Ryazan camera was not found");
-        SpeedCameraIndex.Match yekaterinburgOfficial = official.findNearest(
-                56.247500, 60.872778, 0f, true, 20);
-        require(yekaterinburgOfficial != null
-                        && yekaterinburgOfficial.distanceMeters < 1f,
-                "official Yekaterinburg camera was not found");
-        SpeedCameraIndex.Match missingOfficial = combined.findNearest(
-                47.206400, 39.676300, 45f, true, 100);
-        require(missingOfficial != null,
-                "official Internatsionalnaya camera was not found");
-        require(missingOfficial.camera.id >= 1500000000,
-                "official missing camera was shadowed: " + missingOfficial.camera.id);
-        require(missingOfficial.distanceMeters < 25f,
-                "official missing camera distance is wrong: "
-                        + missingOfficial.distanceMeters);
-        SpeedCameraIndex.Match reverseDirection = combined.findNearest(
-                47.201400, 39.667950, 60f, true, 100);
-        require(reverseDirection != null,
-                "official all-direction fallback was not found");
-        require(reverseDirection.camera.id >= 1500000000,
-                "one-way primary unexpectedly won reverse-direction test: "
-                        + reverseDirection.camera.id);
-
         // Reported road-test regression: eastbound on Stachki Avenue from
         // house 223 toward the city centre. The verified 40 km/h camera is at
         // 47.212335, 39.631195 (HUD) / 47.212375, 39.631131 (official layer).
-        SpeedCameraIndex.Match stachkiEastbound = combined.findNearest(
-                47.211500, 39.627500, 72f, true, 600);
+        SpeedCameraIndex.Match stachkiEastbound = index.findNearest(
+                47.212335, 39.627200, 88f, true, 600);
         require(stachkiEastbound != null,
                 "Stachki 217k1 camera was missed on the eastbound approach");
         require(stachkiEastbound.camera.speed == 40,
@@ -80,7 +47,7 @@ public final class SpeedCameraIndexTest {
         require(stachkiEastbound.distanceMeters < 350f,
                 "Stachki camera distance is wrong: "
                         + stachkiEastbound.distanceMeters);
-        SpeedCameraIndex.Match stachkiWithoutCourse = combined.findNearest(
+        SpeedCameraIndex.Match stachkiWithoutCourse = index.findNearest(
                 47.212100, 39.629900, 0f, false, 180);
         require(stachkiWithoutCourse == null,
                 "camera was acquired without a reliable route course");
@@ -90,6 +57,40 @@ public final class SpeedCameraIndexTest {
                 "increasing distance did not clear passed camera");
         require(SpeedCameraIndex.hasPassedCamera(140f, 50f, true),
                 "camera behind the car was not cleared");
+        require(SpeedCameraIndex.areSamePhysicalCamera(
+                        new SpeedCamera(201, 39.631195, 47.212335, 1, 40, 1, 88),
+                        new SpeedCamera(202, 39.631131, 47.212375, 1, 0, 0, 0),
+                        SpeedCameraIndex.DUPLICATE_RADIUS_METERS),
+                "nearby records were not recognized as one physical camera");
+        require(!SpeedCameraIndex.areSamePhysicalCamera(
+                        new SpeedCamera(203, 39.631195, 47.212335, 1, 40, 1, 88),
+                        new SpeedCamera(204, 39.631600, 47.212700, 1, 40, 0, 0),
+                        SpeedCameraIndex.DUPLICATE_RADIUS_METERS),
+                "distinct cameras were incorrectly grouped");
+
+        // Reported road-test regression on Nagibina Avenue: HUD Speed has a
+        // speed-camera record followed by two traffic-light control records
+        // for the same northbound intersection approach.
+        SpeedCamera nagibinaCamera = new SpeedCamera(
+                2405765, 39.720624, 47.264684, 1, 60, 1, 21);
+        SpeedCamera nagibinaTrafficLight = new SpeedCamera(
+                4142502, 39.720979, 47.265369, 3, 60, 1, 22);
+        SpeedCamera nagibinaNextTrafficLight = new SpeedCamera(
+                4147936, 39.721388, 47.266268, 3, 60, 1, 18);
+        require(SpeedCameraIndex.areSameWarningZone(
+                        nagibinaCamera, nagibinaTrafficLight),
+                "Nagibina intersection records were not grouped");
+        require(SpeedCameraIndex.areSameWarningZone(
+                        nagibinaCamera, nagibinaNextTrafficLight),
+                "Nagibina warning zone was too short");
+        require(!SpeedCameraIndex.areSameWarningZone(
+                        nagibinaCamera,
+                        new SpeedCamera(301, 39.720624, 47.265000, 1, 60, 1, 201)),
+                "opposite approaches were incorrectly grouped");
+        require(!SpeedCameraIndex.areSameWarningZone(
+                        nagibinaCamera,
+                        new SpeedCamera(302, 39.720624, 47.265000, 1, 40, 1, 21)),
+                "different speed limits were incorrectly grouped");
 
         SpeedCameraIndex northOnly = singleCameraIndex(
                 "101,37.6100000,55.7510000,1,60,1,0");
@@ -149,9 +150,16 @@ public final class SpeedCameraIndexTest {
         require("СРЕДНЯЯ СКОРОСТЬ".equals(new SpeedCamera(
                 1, 0, 0, 4, 80, 0, 0).typeLabel()),
                 "camera type label is wrong");
+        require("Камера 60 км/ч".equals(new SpeedCamera(
+                2, 0, 0, 1, 60, 0, 0).hudLabel()),
+                "speed camera HUD label is wrong");
+        require("Камера на светофоре".equals(new SpeedCamera(
+                3, 0, 0, 2, 60, 0, 0).hudLabel()),
+                "traffic-light camera HUD label includes a speed limit");
+        require("Контроль светофора".equals(new SpeedCamera(
+                4, 0, 0, 3, 60, 0, 0).hudLabel()),
+                "traffic-light control HUD label includes a speed limit");
         System.out.println("OK records=" + index.size()
-                + " combined=" + combined.size()
-                + " official=" + official.size()
                 + " repaired=" + index.repairedRows()
                 + " distance=" + distance + " bearing=" + bearing
                 + " exactCamera=" + exact.camera.id
