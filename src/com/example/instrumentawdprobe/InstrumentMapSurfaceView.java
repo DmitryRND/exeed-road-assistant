@@ -4,127 +4,135 @@ import android.app.Application;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.graphics.PointF;
 import android.util.Log;
-import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
 
 import com.yandex.mapkit.Animation;
 import com.yandex.mapkit.geometry.Point;
 import com.yandex.mapkit.map.CameraPosition;
 import com.yandex.mapkit.map.MapWindow;
-import com.yandex.mapkit.map.OffscreenMapWindow;
+import com.yandex.mapkit.mapview.MapView;
 import com.yandex.mapkit.traffic.TrafficLayer;
 import com.yandex.mapkit.user_location.UserLocationLayer;
-import com.yandex.runtime.view.SurfaceFactory;
 
-/** Renders MapKit directly into the instrument overlay's Android Surface. */
-final class InstrumentMapSurfaceView extends SurfaceView
-        implements SurfaceHolder.Callback {
-    private static final String TAG = "InstrumentMapSurface";
+/**
+ * Hosts a regular MapKit MapView in the display-specific instrument window.
+ * This mirrors the proven Media Bridge rendering path and avoids the black
+ * secondary-display buffers observed with OffscreenMapWindow.addSurface().
+ */
+final class InstrumentMapSurfaceView extends FrameLayout {
+    private static final String TAG = "InstrumentMapView";
     private static final Point ROSTOV = new Point(47.2357, 39.7015);
     private static final float INITIAL_ZOOM = 15f;
 
-    private OffscreenMapWindow offscreenMapWindow;
-    private com.yandex.runtime.view.Surface yandexSurface;
+    private final MapView mapView;
     private UserLocationLayer userLocationLayer;
     private TrafficLayer trafficLayer;
     private boolean mapKitAcquired;
-    private int surfaceWidth;
-    private int surfaceHeight;
+    private boolean mapViewStarted;
 
     InstrumentMapSurfaceView(Context context) {
         super(context);
         setBackgroundColor(Color.rgb(9, 10, 9));
-        setZOrderOnTop(false);
-        getHolder().addCallback(this);
+
+        Application application = (Application) context.getApplicationContext();
+        mapKitAcquired = RoadAssistantApplication.acquireMapKit(application);
+        if (!mapKitAcquired) {
+            mapView = null;
+            Log.e(TAG, "MapKit is unavailable for instrument MapView");
+            return;
+        }
+
+        mapView = new MapView(context);
+        mapView.setNoninteractive(true);
+        mapView.setBackgroundColor(Color.rgb(9, 10, 9));
+        promoteOpaqueSurfaces(mapView);
+        addView(mapView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        configureMap(mapView.getMapWindow());
     }
 
-    @Override public void surfaceCreated(SurfaceHolder holder) {
-        createRenderer(holder, getWidth(), getHeight());
-    }
-
-    @Override public void surfaceChanged(SurfaceHolder holder, int format,
-                                         int width, int height) {
-        if (width <= 0 || height <= 0) return;
-        if (offscreenMapWindow == null
-                || width != surfaceWidth || height != surfaceHeight) {
-            destroyRenderer();
-            createRenderer(holder, width, height);
+    private static void promoteOpaqueSurfaces(View view) {
+        if (view instanceof SurfaceView) {
+            SurfaceView surfaceView = (SurfaceView) view;
+            // MapKit uses a SurfaceView. Its default z=-2 places it below the
+            // OEM cluster chrome even though our overlay window is on top.
+            surfaceView.setZOrderOnTop(true);
+            surfaceView.getHolder().setFormat(PixelFormat.OPAQUE);
+            surfaceView.setBackgroundColor(Color.rgb(9, 10, 9));
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                promoteOpaqueSurfaces(group.getChildAt(i));
+            }
         }
     }
 
-    @Override public void surfaceDestroyed(SurfaceHolder holder) {
-        destroyRenderer();
+    private void configureMap(MapWindow mapWindow) {
+        mapWindow.setMaxFps(15);
+        boolean night = (getResources().getConfiguration().uiMode
+                & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO;
+        mapWindow.getMap().setNightModeEnabled(night);
+        mapWindow.getMap().move(new CameraPosition(
+                ROSTOV, INITIAL_ZOOM, 0f, 0f),
+                new Animation(Animation.Type.SMOOTH, 0.35f), null);
+
+        userLocationLayer = com.yandex.mapkit.MapKitFactory.getInstance()
+                .createUserLocationLayer(mapWindow);
+        userLocationLayer.setVisible(true);
+        userLocationLayer.setHeadingModeActive(true);
+        userLocationLayer.setAutoZoomEnabled(true);
+
+        trafficLayer = com.yandex.mapkit.MapKitFactory.getInstance()
+                .createTrafficLayer(mapWindow);
+        trafficLayer.setTrafficVisible(true);
+        Log.i(TAG, "Instrument MapView configured night=" + night + " traffic=true");
     }
 
-    @Override protected void onDetachedFromWindow() {
-        destroyRenderer();
-        super.onDetachedFromWindow();
+    @Override protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (mapView != null && !mapViewStarted) {
+            promoteOpaqueSurfaces(mapView);
+            mapView.onStart();
+            mapViewStarted = true;
+            mapView.post(new Runnable() {
+                @Override public void run() {
+                    promoteOpaqueSurfaces(mapView);
+                }
+            });
+            Log.i(TAG, "Instrument MapView started");
+        }
     }
 
-    private void createRenderer(SurfaceHolder holder, int width, int height) {
-        if (offscreenMapWindow != null || !holder.getSurface().isValid()
-                || width <= 0 || height <= 0) return;
-        Application application = (Application) getContext()
-                .getApplicationContext();
-        if (!RoadAssistantApplication.acquireMapKit(application)) return;
-        mapKitAcquired = true;
-        try {
-            surfaceWidth = width;
-            surfaceHeight = height;
-            offscreenMapWindow = com.yandex.mapkit.MapKitFactory.getInstance()
-                    .createOffscreenMapWindow(width, height);
-            MapWindow mapWindow = offscreenMapWindow.getMapWindow();
-            yandexSurface = SurfaceFactory.from(holder.getSurface());
-            yandexSurface.setAnchorPoint(new PointF(0.5f, 0.5f));
-            mapWindow.setMaxFps(15);
-            mapWindow.addSurface(yandexSurface);
-
-            boolean night = (getResources().getConfiguration().uiMode
-                    & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO;
-            mapWindow.getMap().setNightModeEnabled(night);
-            mapWindow.getMap().move(new CameraPosition(
-                    ROSTOV, INITIAL_ZOOM, 0f, 0f),
-                    new Animation(Animation.Type.SMOOTH, 0.35f), null);
-
-            userLocationLayer = com.yandex.mapkit.MapKitFactory.getInstance()
-                    .createUserLocationLayer(mapWindow);
-            userLocationLayer.setVisible(true);
-            userLocationLayer.setHeadingModeActive(true);
-            userLocationLayer.setAutoZoomEnabled(true);
+    @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight);
+        if (userLocationLayer != null && width > 0 && height > 0) {
             userLocationLayer.setAnchor(
                     new PointF(width * 0.5f, height * 0.5f),
                     new PointF(width * 0.5f, height * 0.68f));
-
-            trafficLayer = com.yandex.mapkit.MapKitFactory.getInstance()
-                    .createTrafficLayer(mapWindow);
-            trafficLayer.setTrafficVisible(true);
-            Log.i(TAG, "Instrument map ready size=" + width + "x" + height
-                    + " night=" + night + " traffic=true");
-        } catch (Throwable error) {
-            Log.e(TAG, "Unable to create instrument MapKit surface", error);
-            destroyRenderer();
+            Log.i(TAG, "Instrument MapView ready size=" + width + "x" + height);
         }
     }
 
-    private void destroyRenderer() {
-        if (offscreenMapWindow != null && yandexSurface != null) {
-            try {
-                offscreenMapWindow.getMapWindow().removeSurface(yandexSurface);
-            } catch (Throwable error) {
-                Log.w(TAG, "Unable to detach instrument map surface", error);
-            }
+    @Override protected void onDetachedFromWindow() {
+        if (mapView != null && mapViewStarted) {
+            mapView.onStop();
+            mapViewStarted = false;
         }
         trafficLayer = null;
         userLocationLayer = null;
-        yandexSurface = null;
-        offscreenMapWindow = null;
-        surfaceWidth = 0;
-        surfaceHeight = 0;
         if (mapKitAcquired) {
             mapKitAcquired = false;
             RoadAssistantApplication.releaseMapKit();
         }
+        super.onDetachedFromWindow();
+        Log.i(TAG, "Instrument MapView stopped");
     }
 }

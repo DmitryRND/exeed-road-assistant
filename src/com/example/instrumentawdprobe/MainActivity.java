@@ -1691,9 +1691,12 @@ public final class MainActivity extends Activity {
                 overlayRoot = overlayContentRoot;
             }
 
+            int requestedWindowType = shouldShowMapIdle()
+                    ? WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY
+                    : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                     fullScreen ? 1920 : 637, fullScreen ? 720 : 637,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    requestedWindowType,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                             | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
@@ -1702,7 +1705,23 @@ public final class MainActivity extends Activity {
             params.x = 0;
             params.y = 0;
             params.setTitle("InstrumentAwdOverlay");
-            overlayWindowManager.addView(overlayRoot, params);
+            try {
+                overlayWindowManager.addView(overlayRoot, params);
+            } catch (RuntimeException systemOverlayDenied) {
+                if (requestedWindowType != WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY) {
+                    throw systemOverlayDenied;
+                }
+                Log.w(TAG, "TYPE_SYSTEM_OVERLAY denied; falling back to APPLICATION_OVERLAY",
+                        systemOverlayDenied);
+                try {
+                    overlayWindowManager.removeViewImmediate(overlayRoot);
+                } catch (RuntimeException cleanupError) {
+                    Log.d(TAG, "Rejected SYSTEM_OVERLAY cleanup was unnecessary", cleanupError);
+                }
+                params.type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+                overlayWindowManager.addView(overlayRoot, params);
+                append("Instrument map: SYSTEM_OVERLAY denied, APPLICATION_OVERLAY fallback used");
+            }
             overlayHandler.removeCallbacks(overlayTimeout);
             if (!liveFullOverlay) {
                 overlayHandler.postDelayed(overlayTimeout, fullScreen ? 8000L : 15000L);
@@ -1974,11 +1993,13 @@ public final class MainActivity extends Activity {
         overlayView.setMapIdle(mapEnabled);
         if (mapEnabled && overlayMapView == null) {
             overlayMapView = new InstrumentMapSurfaceView(overlayContentRoot.getContext());
-            FrameLayout.LayoutParams mapParams = new FrameLayout.LayoutParams(277, 306);
-            mapParams.leftMargin = 258;
-            mapParams.topMargin = 83;
+            // Keep the map centred on the original instrument card while giving
+            // it substantially more room in both directions.
+            FrameLayout.LayoutParams mapParams = new FrameLayout.LayoutParams(637, 500);
+            mapParams.leftMargin = 0;
+            mapParams.topMargin = 0;
             overlayContentRoot.addView(overlayMapView, 0, mapParams);
-            append("Instrument mode: Yandex map 277x306");
+            append("Instrument mode: Yandex map 637x500 opaque top surface");
         } else if (!mapEnabled && overlayMapView != null) {
             overlayContentRoot.removeView(overlayMapView);
             overlayMapView = null;
@@ -2155,13 +2176,17 @@ public final class MainActivity extends Activity {
 
             RectF panel = new RectF(w * 0.405f, h * 0.13f, w * 0.84f, h * 0.61f);
             if (mapIdle && alertCamera == null) return;
-            paint.clearShadowLayer();
-            paint.setShader(null);
-            paint.setAlpha(255);
-            paint.setPathEffect(null);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.argb(238, 9, 10, 9));
-            canvas.drawRoundRect(panel, w * 0.04f, w * 0.04f, paint);
+            // Keep the normal AWD visualization open over the stock cluster background.
+            // Camera and radar states retain a dark panel for text/icon readability.
+            if (alertCamera != null || radarIdle) {
+                paint.clearShadowLayer();
+                paint.setShader(null);
+                paint.setAlpha(255);
+                paint.setPathEffect(null);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(Color.argb(238, 9, 10, 9));
+                canvas.drawRoundRect(panel, w * 0.04f, w * 0.04f, paint);
+            }
 
             if (alertCamera != null) {
                 float alertAlpha;
