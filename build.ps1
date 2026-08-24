@@ -32,7 +32,15 @@ if (-not $mapKitConfigured) {
 
 $jdkHome = $null
 if ($env:JAVA_HOME -and (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin\java.exe'))) {
-    $versionText = & (Join-Path $env:JAVA_HOME 'bin\java.exe') -version 2>&1 | Out-String
+    # java -version writes its normal version banner to stderr. PowerShell 7 can
+    # promote that banner to an ErrorRecord under the script-wide Stop policy.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $versionText = & (Join-Path $env:JAVA_HOME 'bin\java.exe') -version 2>&1 | Out-String
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($versionText -match 'version "(\d+)' -and [int]$Matches[1] -ge 21) {
         $jdkHome = $env:JAVA_HOME
     }

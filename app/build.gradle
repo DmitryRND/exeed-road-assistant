@@ -18,8 +18,8 @@ android {
         applicationId 'com.example.instrumentawdprobe'
         minSdk 26
         targetSdk 28
-        versionCode 38
-        versionName '2.26-mapview-wide-fallback'
+        versionCode 64
+        versionName '2.52-instrument-tbt-minimap-hud'
         buildConfigField 'String', 'MAPKIT_API_KEY', "\"${mapkitApiKey}\""
         ndk {
             abiFilters 'arm64-v8a'

@@ -2,6 +2,7 @@ package com.example.instrumentawdprobe;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityOptions;
 import android.app.Presentation;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -31,7 +32,10 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.media.MediaPlayer;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import android.os.Build;
+import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -44,6 +48,7 @@ import android.content.pm.PackageManager;
 import android.util.Log;
 import android.view.Display;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -70,6 +75,7 @@ import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.URL;
 import java.util.Arrays;
+import java.util.Locale;
 
 /** Read-only probe for instrument Display 2 and the stock AWD energy-flow signals. */
 public final class MainActivity extends Activity {
@@ -84,9 +90,15 @@ public final class MainActivity extends Activity {
     private static final String PREF_AUTOSTART = "autostart";
     private static final String PREF_CAMERA_AUDIO = "camera_audio";
     private static final String PREF_CAMERA_HUD = "camera_hud";
+    private static final String PREF_CAMERA_GPS_GUARD = "camera_gps_guard";
     private static final String PREF_CAMERA_WARNING_MODE = "camera_warning_mode";
     private static final String PREF_CAMERA_SOUND = "camera_sound";
     private static final String PREF_IDLE_MODE = "idle_mode";
+    private static final String PREF_CLUSTER_MANEUVER_POSITION =
+            "cluster_maneuver_position";
+    private static final String PREF_INSTRUMENT_TBT = "instrument_tbt";
+    private static final String PREF_MEDIA_BRIDGE_AUTO_PLAY = "media_bridge_auto_play";
+    private static final String PREF_MEDIA_BRIDGE_ROUTE_CARD = "media_bridge_route_card";
     private static final String PREF_CAMERA_ETAG = "camera_etag";
     private static final String PREF_CAMERA_LAST_MODIFIED = "camera_last_modified";
     private static final int CAMERA_DISTANCE_CITY_METERS = 400;
@@ -131,6 +143,10 @@ public final class MainActivity extends Activity {
     private static final int IDLE_MODE_AWD = 1;
     private static final int IDLE_MODE_RADAR = 2;
     private static final int IDLE_MODE_MAP = 3;
+    private static final String[] CLUSTER_MANEUVER_POSITION_NAMES = {
+            "Сверху, левее центра", "Сверху слева", "Слева ниже", "Снизу справа"
+    };
+    private static final int CLUSTER_MANEUVER_POSITION_UPPER_INNER = 0;
 
     private static final String IPK_PACKAGE = "com.neusoft.ipkservice";
     private static final String IPK_SERVICE =
@@ -138,13 +154,71 @@ public final class MainActivity extends Activity {
     private static final String IPK_ACTION = "android.service.IPK.EcologicalDataService";
     private static final String IPK_DESCRIPTOR =
             "com.neusoft.ConnectServiceApi.IPKService.IIPKService";
+    private static final String IPK_NAVI_CALLBACK_DESCRIPTOR =
+            "com.neusoft.ConnectServiceApi.IPKService.IIPKChangeNaviCacllback";
+    private static final String IPK_KEY_CALLBACK_DESCRIPTOR =
+            "com.neusoft.ConnectServiceApi.IPKService.IIPKKeyNotify";
     private static final int TRANSACTION_UPDATE_NAVI_INFO = 3;
+    private static final int TRANSACTION_UPDATE_TBT_NAVI_INFO = 6;
+    private static final int TRANSACTION_REGISTER_NAVI_CALLBACK = 7;
+    private static final int TRANSACTION_UNREGISTER_NAVI_CALLBACK = 8;
+    private static final int TRANSACTION_REGISTER_IPK_KEY_CALLBACK = 13;
+    private static final int TRANSACTION_UNREGISTER_IPK_KEY_CALLBACK = 14;
+    private static final int TRANSACTION_ON_CHANGE_NAVI = 1;
+    private static final int TRANSACTION_ON_IPK_KEY_PRESSED = 1;
+    private static final int TRANSACTION_ON_IPK_KEY_RELEASED = 2;
+    private static final int IPK_REQUEST_MINI = 1;
+    private static final int IPK_REQUEST_FULL_SCREEN = 2;
+    // This firmware uses mapMode=3/state=3 to make the stock navigation pane
+    // transparent while keeping its MINI slot active for our overlay.
+    private static final int IPK_WIDGET_MAP_MODE = 3;
+    private static final String YANDEX_NAVI_PACKAGE = "ru.yandex.yandexnavi";
+    private static final String YANDEX_MAPS_PACKAGE = "ru.yandex.yandexmaps";
+    private static final String YANDEX_CLUSTER_ACTIVITY =
+            "ru.yandex.yandexmaps.app.ClusterMapActivity";
+    private static final String YANDEX_CLUSTER_ACTION =
+            "ru.yandex.yandexnavi.action.CLUSTER_MAP";
+    private static final String YANDEX_MANEUVER_ACTION = "Y.maneuver.guide";
+    private static final String YANDEX_MANEUVER_VISIBILITY_ACTION = "Y.maneuver.vis";
+    private static final String YANDEX_NAV_MAP_ACTION = "Y.nav.map";
+    private static final String YANDEX_CLUSTER_LAYOUT_ACTION = "Y.lay.guide";
+    private static final String TELENAV_ACTION = "com.telenav.app.START";
+    private static final String TELENAV_EXTRA_PANEL_TBT_ENABLED = "panelTbtEnabled";
+    private static final ComponentName TELENAV_RECEIVER = new ComponentName(
+            "com.telenav.app.arp", "com.telenav.app.receiver.BootReceiver");
+    private static final String MEDIA_BRIDGE_PACKAGE = "ru.exeed.yandexmediabridge";
+    private static final ComponentName MEDIA_BRIDGE_CONTROL_RECEIVER = new ComponentName(
+            MEDIA_BRIDGE_PACKAGE,
+            "ru.exeed.yandexmediabridge.BridgeControlReceiver");
+    private static final String MEDIA_BRIDGE_ACTION_START =
+            "ru.exeed.yandexmediabridge.action.START";
+    private static final String MEDIA_BRIDGE_ACTION_SET_AUTO_PLAY =
+            "ru.exeed.yandexmediabridge.action.SET_AUTO_PLAY";
+    private static final String MEDIA_BRIDGE_EXTRA_AUTO_PLAY =
+            "ru.exeed.yandexmediabridge.extra.AUTO_PLAY_ENABLED";
+    private static final String MEDIA_BRIDGE_ACTION_SET_ROUTE_CARD =
+            "ru.exeed.yandexmediabridge.action.SET_LAUNCHER_ROUTE_CARD";
+    private static final String MEDIA_BRIDGE_EXTRA_ROUTE_CARD =
+            "ru.exeed.yandexmediabridge.extra.LAUNCHER_ROUTE_CARD_ENABLED";
+    private static final String NEUSOFT_NAVI_STATE_ACTION =
+            "AUTONAVI_STANDARD_BROADCAST_SEND";
+    private static final String NEUSOFT_NAVI_KEY_TYPE = "KEY_TYPE";
+    private static final String NEUSOFT_NAVI_EXTRA_STATE = "EXTRA_STATE";
+    private static final int NEUSOFT_NAVI_TYPE = 10019;
+    private static final int NEUSOFT_NAVI_START = 8;
+    private static final int NEUSOFT_NAVI_STOP = 9;
+    private static final int STEERING_SILENT_SAMPLE_RATE = 48000;
+    private static final long STEERING_LONG_PRESS_MS = 1200L;
+    private static final boolean ENABLE_STEERING_MEDIA_SHORTCUT = false;
+    private static final int RPC_HARD_KEY_EVENT = 1296;
+    private static final int INSTRUMENT_MODE_KEY_CODE = 76;
 
     private static final int PROP_ESTIMATED_COUPLING_TORQUE = 560992876;
     private static final int PROP_ENGINE_WHEEL_TORQUE_RATIO = 560992877;
     private static final int PROP_MEAN_EFFECTIVE_TORQUE = 560992878;
     private static final int PROP_HUD_DISTANCE_TO_DESTINATION = 560992986;
     private static final int PROP_HUD_DISTANCE_TO_JUNCTION = 560992987;
+    private static final int PROP_HUD_NAVIGATION_TEXT = 560992988;
     private static final int PROP_ENGINE_STATE = 557847175;
     private static final int PROP_LEVER_MODE = 557847156;
     private static final int[] AWD_PROPERTIES = {
@@ -160,9 +234,15 @@ public final class MainActivity extends Activity {
     private Button enableButton;
     private Button disableButton;
     private Spinner idleModeSpinner;
+    private Spinner clusterManeuverPositionSpinner;
     private CheckBox cameraAudioCheck;
     private CheckBox cameraHudCheck;
+    private CheckBox cameraGpsGuardCheck;
     private CheckBox autostartCheck;
+    private CheckBox mediaBridgeAutoPlayCheck;
+    private CheckBox mediaBridgeRouteCardCheck;
+    private CheckBox instrumentTbtCheck;
+    private TextView mediaBridgeStatusView;
     private Spinner cameraSoundSpinner;
     private Spinner cameraWarningModeSpinner;
     private TextView cameraDistanceView;
@@ -175,18 +255,32 @@ public final class MainActivity extends Activity {
     private FrameLayout overlayContentRoot;
     private AwdView overlayView;
     private InstrumentMapSurfaceView overlayMapView;
+    private WindowManager clusterGuidanceWindowManager;
+    private ClusterGuidanceView clusterGuidanceView;
     private Object car;
     private Object vendorManager;
     private Object vendorCallback;
     private IBinder ipkBinder;
     private boolean ipkBound;
+    private boolean ipkNaviCallbackRegistered;
+    private boolean ipkKeyCallbackRegistered;
     private int pendingNavigationMode = -1;
     private volatile SpeedCameraIndex cameraIndex;
     private LocationManager locationManager;
     private Location lastLocation;
     private Location courseAnchorLocation;
     private long lastLocationUpdateElapsedMs;
+    private long lastLocationGuardLogElapsedMs;
+    private final LocationGuard locationGuard = new LocationGuard();
     private boolean locationReceiverRegistered;
+    private boolean yandexGuidanceReceiverRegistered;
+    private String yandexNextRoadName = "";
+    private String yandexManeuverResourceId = "";
+    private int yandexManeuverDistanceMeters;
+    private int yandexRouteDistanceMeters;
+    private int yandexRouteTimeSeconds;
+    private boolean yandexManeuverVisible;
+    private int hudNavigationTextGeneration;
     private long lastCameraScanLogMs;
     private SpeedCamera activeCamera;
     private SpeedCamera lastPassedCamera;
@@ -214,6 +308,60 @@ public final class MainActivity extends Activity {
     private int demoRearPerWheel = -1;
     private boolean liveFullOverlay;
     private final Handler overlayHandler = new Handler(Looper.getMainLooper());
+    private MediaSession steeringMediaSession;
+    private AudioTrack steeringSilentAudioTrack;
+    private long steeringButtonDownMs;
+    private boolean steeringLongPressHandled;
+    private boolean instrumentMapFullScreenActive;
+    private static volatile Object instrumentModeRpcListener;
+    private static volatile MainActivity activeInstance;
+    private final IBinder ipkNaviCallback = new Binder() {
+        @Override
+        protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+                throws RemoteException {
+            if (code == IBinder.INTERFACE_TRANSACTION) {
+                if (reply != null) reply.writeString(IPK_NAVI_CALLBACK_DESCRIPTOR);
+                return true;
+            }
+            if (code == TRANSACTION_ON_CHANGE_NAVI) {
+                data.enforceInterface(IPK_NAVI_CALLBACK_DESCRIPTOR);
+                final int requestedMode = data.readInt();
+                overlayHandler.post(new Runnable() {
+                    @Override public void run() {
+                        handleInstrumentNavigationRequest(requestedMode);
+                    }
+                });
+                if (reply != null) reply.writeNoException();
+                return true;
+            }
+            return super.onTransact(code, data, reply, flags);
+        }
+    };
+    private final IBinder ipkKeyCallback = new Binder() {
+        @Override
+        protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+                throws RemoteException {
+            if (code == IBinder.INTERFACE_TRANSACTION) {
+                if (reply != null) reply.writeString(IPK_KEY_CALLBACK_DESCRIPTOR);
+                return true;
+            }
+            if (code == TRANSACTION_ON_IPK_KEY_PRESSED
+                    || code == TRANSACTION_ON_IPK_KEY_RELEASED) {
+                data.enforceInterface(IPK_KEY_CALLBACK_DESCRIPTOR);
+                final int keyCode = data.readInt();
+                final boolean pressed = code == TRANSACTION_ON_IPK_KEY_PRESSED;
+                overlayHandler.post(new Runnable() {
+                    @Override public void run() {
+                        append("IPK instrument key " + keyCode + " "
+                                + (pressed ? "pressed" : "released"));
+                    }
+                });
+                if (reply != null) reply.writeNoException();
+                return true;
+            }
+            return super.onTransact(code, data, reply, flags);
+        }
+    };
     private final Runnable overlayTimeout = new Runnable() {
         @Override public void run() { dismissInstrumentOverlay(); }
     };
@@ -258,6 +406,58 @@ public final class MainActivity extends Activity {
             handleCameraLocation(location);
         }
     };
+    private final BroadcastReceiver yandexGuidanceReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (intent == null) return;
+            String action = intent.getAction();
+            if (YANDEX_MANEUVER_VISIBILITY_ACTION.equals(action)) {
+                yandexManeuverVisible = intent.getBooleanExtra("Visible", false);
+                if (yandexManeuverVisible) scheduleHudNavigationTextRewrite();
+                updateClusterGuidanceOverlay();
+                return;
+            }
+            if (YANDEX_NAV_MAP_ACTION.equals(action)) {
+                if (intent.getBooleanExtra("clear", false)) {
+                    yandexRouteDistanceMeters = 0;
+                    yandexRouteTimeSeconds = 0;
+                } else {
+                    if (intent.hasExtra("distanceToFinish")) {
+                        yandexRouteDistanceMeters = Math.max(0,
+                                (int) Math.round(intent.getDoubleExtra("distanceToFinish", 0d)));
+                    }
+                    if (intent.hasExtra("timeToFinish")) {
+                        yandexRouteTimeSeconds = Math.max(0,
+                                (int) Math.round(intent.getDoubleExtra("timeToFinish", 0d)));
+                    }
+                }
+                updateClusterGuidanceOverlay();
+                return;
+            }
+            if (!YANDEX_MANEUVER_ACTION.equals(action)) return;
+            if (intent.hasExtra("resourceId")) {
+                yandexManeuverResourceId = stringExtra(intent, "resourceId");
+            }
+            if (intent.hasExtra("nextRoadName")) {
+                yandexNextRoadName = stringExtra(intent, "nextRoadName");
+                scheduleHudNavigationTextRewrite();
+            }
+            if (intent.hasExtra("distance") || intent.hasExtra("unit")) {
+                yandexManeuverDistanceMeters = parseYandexDistanceMeters(
+                        stringExtra(intent, "distance"), stringExtra(intent, "unit"));
+                yandexManeuverVisible = true;
+            }
+            if (intent.hasExtra("distanceleft")) {
+                yandexRouteDistanceMeters = parseYandexDistanceMeters(
+                        stringExtra(intent, "distanceleft"), "m");
+            }
+            if (intent.hasExtra("resourceId") || intent.hasExtra("nextRoadName")
+                    || intent.hasExtra("distance")) {
+                Log.i(TAG, "Yandex guidance received for instrument overlay; "
+                        + "persistent HUD forwarding is owned by FakeTeleNav");
+            }
+            updateClusterGuidanceOverlay();
+        }
+    };
     private final Runnable cameraLocationWatchdog = new Runnable() {
         @Override public void run() {
             if (!isAwdEnabled()) return;
@@ -281,12 +481,17 @@ public final class MainActivity extends Activity {
             ipkBinder = service;
             ipkBound = true;
             append("IPKService подключён: " + name.flattenToShortString());
+            registerIpkNaviCallback();
+            registerIpkKeyCallback();
             flushPendingNavigationMode();
+            if (yandexManeuverVisible) sendYandexManeuverToHud(false);
         }
 
         @Override public void onServiceDisconnected(ComponentName name) {
             ipkBinder = null;
             ipkBound = false;
+            ipkNaviCallbackRegistered = false;
+            ipkKeyCallbackRegistered = false;
             append("IPKService отключён");
         }
     };
@@ -309,13 +514,21 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        activeInstance = this;
         demoFrontPerWheel = getIntent().getIntExtra("demo_front", -1);
         demoRearPerWheel = getIntent().getIntExtra("demo_rear", -1);
         liveFullOverlay = isAwdEnabled();
         registerReceiver(locationUpdateReceiver,
                 new IntentFilter(CameraLocationService.ACTION_LOCATION_UPDATE));
         locationReceiverRegistered = true;
+        IntentFilter guidanceFilter = new IntentFilter();
+        guidanceFilter.addAction(YANDEX_MANEUVER_ACTION);
+        guidanceFilter.addAction(YANDEX_MANEUVER_VISIBILITY_ACTION);
+        guidanceFilter.addAction(YANDEX_NAV_MAP_ACTION);
+        registerReceiver(yandexGuidanceReceiver, guidanceFilter);
+        yandexGuidanceReceiverRegistered = true;
         buildControlUi();
+        registerInstrumentModeRpcProbe();
         refreshBatteryInfo();
         loadCameraDatabaseAsync(false);
         handleControlIntent(getIntent());
@@ -323,6 +536,75 @@ public final class MainActivity extends Activity {
             overlayHandler.postDelayed(new Runnable() {
                 @Override public void run() { moveTaskToBack(true); }
             }, 1800L);
+        }
+    }
+
+    /**
+     * The cluster mode button is not exposed through Android KeyEvent or the
+     * IPK key callback on this firmware.  It is present on the shared vehicle
+     * RPC hard-key stream as opcode 1296, key 76.  Keep this build passive:
+     * log both actions first, then enable behavior only after an in-car test.
+     */
+    private void registerInstrumentModeRpcProbe() {
+        if (instrumentModeRpcListener != null) {
+            Log.i(TAG, "Instrument mode RPC probe already registered");
+            return;
+        }
+        try {
+            final Class<?> managerClass = Class.forName("alfusos.rpc.RpcManager");
+            final Class<?> listenerClass =
+                    Class.forName("alfusos.rpc.RpcManager$OnRpcListener");
+            final Object manager = managerClass.getMethod("getInstance").invoke(null);
+            ClassLoader loader = listenerClass.getClassLoader();
+            if (loader == null) loader = MainActivity.class.getClassLoader();
+            final Object listener = Proxy.newProxyInstance(loader,
+                    new Class<?>[]{listenerClass}, new InvocationHandler() {
+                @Override public Object invoke(Object proxy, Method method, Object[] args) {
+                    if ("onCallback".equals(method.getName()) && args != null
+                            && args.length >= 2 && args[0] instanceof Integer
+                            && args[1] instanceof byte[]) {
+                        final int opcode = (Integer) args[0];
+                        final byte[] packet = (byte[]) args[1];
+                        if (opcode == RPC_HARD_KEY_EVENT && packet.length >= 2) {
+                            final int keyCode = packet[0] & 0xff;
+                            final int action = packet[1] & 0xff;
+                            if (keyCode == INSTRUMENT_MODE_KEY_CODE) {
+                                Log.i(TAG, "Instrument mode RPC key=" + keyCode
+                                        + " action=" + action
+                                        + " packet=" + Arrays.toString(packet));
+                                if (action == 2) {
+                                    final MainActivity activity = activeInstance;
+                                    if (activity != null) {
+                                        activity.overlayHandler.post(new Runnable() {
+                                            @Override public void run() {
+                                                activity.toggleInstrumentMapFromModeKey();
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        return null;
+                    }
+                    if ("toString".equals(method.getName())) {
+                        return "InstrumentModeRpcListener";
+                    }
+                    if ("hashCode".equals(method.getName())) {
+                        return System.identityHashCode(proxy);
+                    }
+                    if ("equals".equals(method.getName())) {
+                        return args != null && args.length == 1 && proxy == args[0];
+                    }
+                    return null;
+                }
+            });
+            managerClass.getMethod("registerListener", int.class, byte.class, listenerClass)
+                    .invoke(manager, RPC_HARD_KEY_EVENT, (byte) -1, listener);
+            instrumentModeRpcListener = listener;
+            Log.i(TAG, "Instrument mode RPC probe registered: opcode="
+                    + RPC_HARD_KEY_EVENT + " key=" + INSTRUMENT_MODE_KEY_CODE);
+        } catch (Throwable error) {
+            Log.w(TAG, "Instrument mode RPC probe registration failed", error);
         }
     }
 
@@ -410,6 +692,93 @@ public final class MainActivity extends Activity {
         });
         root.addView(autostartCheck, matchWrap());
 
+        TextView homeScreenTitle = new TextView(this);
+        homeScreenTitle.setText("Главный экран и Яндекс Музыка");
+        homeScreenTitle.setTextColor(Color.rgb(31, 32, 31));
+        homeScreenTitle.setTextSize(22f);
+        homeScreenTitle.setPadding(0, dp(18), 0, dp(8));
+        root.addView(homeScreenTitle, matchWrap());
+
+        mediaBridgeStatusView = new TextView(this);
+        mediaBridgeStatusView.setText(isMediaBridgeInstalled()
+                ? "Media Bridge установлен; отдельная иконка скрыта"
+                : "Media Bridge не установлен");
+        mediaBridgeStatusView.setTextSize(16f);
+        mediaBridgeStatusView.setTextColor(Color.rgb(104, 103, 98));
+        mediaBridgeStatusView.setPadding(0, 0, 0, dp(6));
+        root.addView(mediaBridgeStatusView, matchWrap());
+
+        mediaBridgeAutoPlayCheck = new CheckBox(this);
+        mediaBridgeAutoPlayCheck.setText("Запускать Яндекс Музыку после загрузки");
+        mediaBridgeAutoPlayCheck.setTextSize(18f);
+        mediaBridgeAutoPlayCheck.setTextColor(Color.rgb(52, 52, 50));
+        mediaBridgeAutoPlayCheck.setChecked(preferences.getBoolean(
+                PREF_MEDIA_BRIDGE_AUTO_PLAY, true));
+        mediaBridgeAutoPlayCheck.setEnabled(isMediaBridgeInstalled());
+        mediaBridgeAutoPlayCheck.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                boolean enabled = mediaBridgeAutoPlayCheck.isChecked();
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(PREF_MEDIA_BRIDGE_AUTO_PLAY, enabled).apply();
+                sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_AUTO_PLAY, enabled);
+            }
+        });
+        root.addView(mediaBridgeAutoPlayCheck, matchWrap());
+
+        mediaBridgeRouteCardCheck = new CheckBox(this);
+        mediaBridgeRouteCardCheck.setText("Показывать активный маршрут на главном экране");
+        mediaBridgeRouteCardCheck.setTextSize(18f);
+        mediaBridgeRouteCardCheck.setTextColor(Color.rgb(52, 52, 50));
+        mediaBridgeRouteCardCheck.setChecked(preferences.getBoolean(
+                PREF_MEDIA_BRIDGE_ROUTE_CARD, true));
+        mediaBridgeRouteCardCheck.setEnabled(isMediaBridgeInstalled());
+        mediaBridgeRouteCardCheck.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                boolean enabled = mediaBridgeRouteCardCheck.isChecked();
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(PREF_MEDIA_BRIDGE_ROUTE_CARD, enabled).apply();
+                sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_ROUTE_CARD, enabled);
+            }
+        });
+        root.addView(mediaBridgeRouteCardCheck, matchWrap());
+
+        Button mediaBridgeStartButton = createControlButton("Запустить Media Bridge",
+                Color.rgb(116, 107, 95), Color.WHITE);
+        mediaBridgeStartButton.setEnabled(isMediaBridgeInstalled());
+        mediaBridgeStartButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_START, null);
+            }
+        });
+        root.addView(mediaBridgeStartButton, controlButtonParams());
+
+        Button notificationAccessButton = createControlButton(
+                "Доступ Media Bridge к уведомлениям",
+                Color.rgb(116, 107, 95), Color.WHITE);
+        notificationAccessButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                openSystemSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+            }
+        });
+        root.addView(notificationAccessButton, controlButtonParams());
+
+        Button accessibilityButton = createControlButton(
+                "Спецвозможности для карты на главном экране",
+                Color.rgb(116, 107, 95), Color.WHITE);
+        accessibilityButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                openSystemSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+            }
+        });
+        root.addView(accessibilityButton, controlButtonParams());
+
+        if (isMediaBridgeInstalled()) {
+            sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_AUTO_PLAY,
+                    mediaBridgeAutoPlayCheck.isChecked());
+            sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_ROUTE_CARD,
+                    mediaBridgeRouteCardCheck.isChecked());
+        }
+
         TextView idleModeLabel = new TextView(this);
         idleModeLabel.setText("Заставка на приборной панели");
         idleModeLabel.setTextSize(17f);
@@ -436,6 +805,46 @@ public final class MainActivity extends Activity {
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
         root.addView(idleModeSpinner, matchWrap());
+
+        instrumentTbtCheck = new CheckBox(this);
+        instrumentTbtCheck.setText("Показывать манёвр вне полноэкранной карты");
+        instrumentTbtCheck.setTextSize(18f);
+        instrumentTbtCheck.setTextColor(Color.rgb(52, 52, 50));
+        instrumentTbtCheck.setChecked(preferences.getBoolean(PREF_INSTRUMENT_TBT, true));
+        instrumentTbtCheck.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(PREF_INSTRUMENT_TBT, instrumentTbtCheck.isChecked()).apply();
+                syncFakeTeleNavInstrumentTbt();
+            }
+        });
+        root.addView(instrumentTbtCheck, matchWrap());
+
+        TextView clusterManeuverPositionLabel = new TextView(this);
+        clusterManeuverPositionLabel.setText("Карточка манёвра в полноэкранной карте");
+        clusterManeuverPositionLabel.setTextSize(17f);
+        clusterManeuverPositionLabel.setTextColor(Color.rgb(52, 52, 50));
+        clusterManeuverPositionLabel.setPadding(0, dp(10), 0, dp(4));
+        root.addView(clusterManeuverPositionLabel, matchWrap());
+
+        clusterManeuverPositionSpinner = new Spinner(this);
+        ArrayAdapter<String> clusterPositionAdapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, CLUSTER_MANEUVER_POSITION_NAMES);
+        clusterPositionAdapter.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
+        clusterManeuverPositionSpinner.setAdapter(clusterPositionAdapter);
+        clusterManeuverPositionSpinner.setSelection(getClusterManeuverPosition());
+        clusterManeuverPositionSpinner.setOnItemSelectedListener(
+                new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view,
+                                                  int position, long id) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putInt(PREF_CLUSTER_MANEUVER_POSITION, position).apply();
+                updateClusterGuidanceOverlay();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
+        root.addView(clusterManeuverPositionSpinner, matchWrap());
 
         TextView cameraTitle = new TextView(this);
         cameraTitle.setText("Предупреждения о камерах");
@@ -483,6 +892,26 @@ public final class MainActivity extends Activity {
             }
         });
         root.addView(cameraHudCheck, matchWrap());
+
+        cameraGpsGuardCheck = new CheckBox(this);
+        cameraGpsGuardCheck.setText("Защита GPS от скачков (пробный режим)");
+        cameraGpsGuardCheck.setTextSize(18f);
+        cameraGpsGuardCheck.setTextColor(Color.rgb(52, 52, 50));
+        cameraGpsGuardCheck.setChecked(preferences.getBoolean(
+                PREF_CAMERA_GPS_GUARD, false));
+        cameraGpsGuardCheck.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                boolean enabled = cameraGpsGuardCheck.isChecked();
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(PREF_CAMERA_GPS_GUARD, enabled).apply();
+                locationGuard.reset();
+                lastLocationGuardLogElapsedMs = 0L;
+                append(enabled
+                        ? "GPS Guard включён: скачки и невалидное время будут отбрасываться"
+                        : "GPS Guard выключен: используется исходный поток GPS");
+            }
+        });
+        root.addView(cameraGpsGuardCheck, matchWrap());
 
         TextView warningModeLabel = new TextView(this);
         warningModeLabel.setText("Когда предупреждать о скоростных камерах");
@@ -586,6 +1015,54 @@ public final class MainActivity extends Activity {
         return button;
     }
 
+    private boolean isMediaBridgeInstalled() {
+        try {
+            getPackageManager().getPackageInfo(MEDIA_BRIDGE_PACKAGE, 0);
+            return true;
+        } catch (PackageManager.NameNotFoundException ignored) {
+            return false;
+        }
+    }
+
+    private void sendMediaBridgeControl(String action, Boolean enabledValue) {
+        if (!isMediaBridgeInstalled()) {
+            if (mediaBridgeStatusView != null) {
+                mediaBridgeStatusView.setText("Media Bridge не установлен");
+            }
+            return;
+        }
+        Intent intent = new Intent(action);
+        intent.setComponent(MEDIA_BRIDGE_CONTROL_RECEIVER);
+        if (enabledValue != null) {
+            if (MEDIA_BRIDGE_ACTION_SET_ROUTE_CARD.equals(action)) {
+                intent.putExtra(MEDIA_BRIDGE_EXTRA_ROUTE_CARD,
+                        enabledValue.booleanValue());
+            } else {
+                intent.putExtra(MEDIA_BRIDGE_EXTRA_AUTO_PLAY,
+                        enabledValue.booleanValue());
+            }
+        }
+        try {
+            sendBroadcast(intent);
+            if (mediaBridgeStatusView != null) {
+                mediaBridgeStatusView.setText("Media Bridge активирован из Дорожного ассистента");
+            }
+        } catch (RuntimeException error) {
+            Log.e(TAG, "Media Bridge control failed", error);
+            if (mediaBridgeStatusView != null) {
+                mediaBridgeStatusView.setText("Не удалось запустить Media Bridge");
+            }
+        }
+    }
+
+    private void openSystemSettings(String action) {
+        try {
+            startActivity(new Intent(action));
+        } catch (RuntimeException error) {
+            Log.e(TAG, "Cannot open system settings: " + action, error);
+        }
+    }
+
     private void refreshBatteryInfo() {
         if (batteryInfoView == null) return;
         batteryInfoView.setText("12 В: чтение…");
@@ -673,11 +1150,13 @@ public final class MainActivity extends Activity {
         connectToCarService();
         startCameraMonitoring();
         requestNavigationMode(true);
+        updateSteeringInputShortcut();
         overlayHandler.removeCallbacks(showPersistentOverlay);
         overlayHandler.postDelayed(showPersistentOverlay, 900L);
     }
 
     private void disableAwdDisplay() {
+        instrumentMapFullScreenActive = false;
         getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit().putBoolean(PREF_ENABLED, false).apply();
         liveFullOverlay = false;
@@ -689,6 +1168,7 @@ public final class MainActivity extends Activity {
         demoAlertActive = false;
         overlayHandler.removeCallbacks(clearDemoAlert);
         clearActiveCamera();
+        releaseSteeringInputShortcut();
         requestNavigationMode(false);
         updateControlUi(false, "Выключено");
     }
@@ -746,9 +1226,9 @@ public final class MainActivity extends Activity {
     private void flushPendingNavigationMode() {
         if (pendingNavigationMode < 0 || ipkBinder == null) return;
         boolean enabled = pendingNavigationMode == 1;
-        if (sendNavigationStatus(enabled ? 3 : 0, enabled ? 3 : 5)) {
+        if (sendNavigationStatus(enabled ? IPK_WIDGET_MAP_MODE : 0, enabled ? 3 : 5)) {
             pendingNavigationMode = -1;
-            append(enabled ? "MINI navigation enabled" : "Navigation state restored");
+            append(enabled ? "Transparent MINI navigation enabled" : "Navigation state restored");
         }
     }
 
@@ -777,6 +1257,606 @@ public final class MainActivity extends Activity {
             reply.recycle();
             data.recycle();
         }
+    }
+
+    private static String stringExtra(Intent intent, String key) {
+        try {
+            String value = intent.getStringExtra(key);
+            return value == null ? "" : value;
+        } catch (Throwable ignored) {
+            Object value = intent.getExtras() == null ? null : intent.getExtras().get(key);
+            return value == null ? "" : String.valueOf(value);
+        }
+    }
+
+    private static int parseYandexDistanceMeters(String distance, String unit) {
+        String source = distance == null ? "" : distance.trim().toLowerCase(Locale.US);
+        String normalizedUnit = unit == null ? "" : unit.trim().toLowerCase(Locale.US);
+        String number = source.replace(',', '.').replaceAll("[^0-9.]", "");
+        if (number.length() == 0) return 0;
+        try {
+            double value = Double.parseDouble(number);
+            if (normalizedUnit.contains("km") || normalizedUnit.contains("км")
+                    || source.contains("km") || source.contains("км")) {
+                value *= 1000.0d;
+            }
+            return Math.max(0, (int) Math.round(value));
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
+    /** Converts NaviKit resource names to the M821 maneuver codes used by IPKService. */
+    private static int yandexManeuverIcon(String resourceId) {
+        String id = resourceId == null ? "" : resourceId.toLowerCase(Locale.US)
+                .replace('-', '_');
+        if (id.contains("destination") || id.contains("finish")) return 22;
+        if (id.contains("tunnel")) return 28;
+        if (id.contains("roundabout") || id.contains("traffic_circle")
+                || id.contains("circular")) {
+            return id.contains("leave") || id.contains("exit") ? 25 : 24;
+        }
+        if (id.contains("uturn") || id.contains("u_turn") || id.contains("u-turn")) {
+            return id.contains("right") ? 9 : 8;
+        }
+        boolean left = id.contains("left");
+        boolean right = id.contains("right");
+        if (id.contains("hard") || id.contains("sharp") || id.contains("back")) {
+            if (left) return 6;
+            if (right) return 7;
+        }
+        if (id.contains("slight") || id.contains("ahead") || id.contains("fork")
+                || id.contains("bear") || id.contains("merge")) {
+            if (left) return 2;
+            if (right) return 3;
+        }
+        if (left) return 4;
+        if (right) return 5;
+        return 1;
+    }
+
+    /** Maps NaviKit resource names to the TeleNav maneuver IDs consumed by ExtraService. */
+    private static int yandexTeleNavManeuver(String resourceId) {
+        String id = resourceId == null ? "" : resourceId.toLowerCase(Locale.US)
+                .replace('-', '_');
+        boolean left = id.contains("left");
+        boolean right = id.contains("right");
+        if (id.contains("destination") || id.contains("finish")) {
+            return left ? 2 : right ? 4 : 0;
+        }
+        if (id.contains("roundabout") || id.contains("traffic_circle")
+                || id.contains("circular")) {
+            return left ? 27 : 28;
+        }
+        if (id.contains("uturn") || id.contains("u_turn") || id.contains("u-turn")) {
+            return right ? 22 : 21;
+        }
+        if (id.contains("exit")) return left ? 11 : right ? 13 : 14;
+        if (id.contains("merge")) return left ? 7 : right ? 9 : 14;
+        if (id.contains("hard") || id.contains("sharp") || id.contains("back")) {
+            return left ? 15 : right ? 16 : 14;
+        }
+        if (id.contains("slight") || id.contains("ahead") || id.contains("fork")
+                || id.contains("bear")) {
+            return left ? 19 : right ? 20 : 14;
+        }
+        if (left) return 17;
+        if (right) return 18;
+        return 14;
+    }
+
+    private boolean sendYandexManeuverToHud(boolean clear) {
+        try {
+            Intent hud = new Intent(TELENAV_ACTION).setComponent(TELENAV_RECEIVER);
+            if (clear) {
+                hud.putExtra("mode", "STOP");
+            } else {
+                boolean panelTbt = shouldEnableFakeTeleNavInstrumentTbt();
+                hud.putExtra("mode", panelTbt ? "PANEL_LEGACY" : "LEGACY");
+                hud.putExtra("street", yandexNextRoadName);
+                hud.putExtra("turn", yandexTeleNavManeuver(yandexManeuverResourceId));
+                hud.putExtra("panelTurn", yandexManeuverIcon(yandexManeuverResourceId));
+                hud.putExtra("distance", yandexManeuverDistanceMeters);
+                hud.putExtra("destDistance", Math.max(
+                        yandexManeuverDistanceMeters, yandexRouteDistanceMeters));
+                hud.putExtra("intervalMs", 1000L);
+            }
+            sendBroadcast(hud);
+            Log.i(TAG, clear ? "Yandex HUD maneuver cleared through FakeTeleNav"
+                    : "Yandex HUD maneuver through FakeTeleNav: id="
+                    + yandexManeuverResourceId
+                    + " telenav=" + yandexTeleNavManeuver(yandexManeuverResourceId)
+                    + " road=" + yandexNextRoadName
+                    + " distance=" + yandexManeuverDistanceMeters
+                    + " routeLeft=" + yandexRouteDistanceMeters);
+            return true;
+        } catch (Throwable error) {
+            Log.w(TAG, "Yandex HUD FakeTeleNav update failed", error);
+            return false;
+        }
+    }
+
+    private boolean shouldEnableFakeTeleNavInstrumentTbt() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(PREF_INSTRUMENT_TBT, true)
+                && !instrumentMapFullScreenActive;
+    }
+
+    private void syncFakeTeleNavInstrumentTbt() {
+        try {
+            boolean enabled = shouldEnableFakeTeleNavInstrumentTbt();
+            Intent control = new Intent(TELENAV_ACTION).setComponent(TELENAV_RECEIVER);
+            control.putExtra(TELENAV_EXTRA_PANEL_TBT_ENABLED, enabled);
+            sendBroadcast(control);
+            Log.i(TAG, "FakeTeleNav instrument TBT enabled=" + enabled
+                    + " fullScreen=" + instrumentMapFullScreenActive
+                    + " miniMap=" + shouldShowMapIdle());
+        } catch (Throwable error) {
+            Log.w(TAG, "FakeTeleNav instrument TBT sync failed", error);
+        }
+    }
+
+    private boolean registerIpkNaviCallback() {
+        if (ipkBinder == null || ipkNaviCallbackRegistered) return ipkNaviCallbackRegistered;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(IPK_DESCRIPTOR);
+            data.writeStrongBinder(ipkNaviCallback);
+            boolean handled = ipkBinder.transact(
+                    TRANSACTION_REGISTER_NAVI_CALLBACK, data, reply, 0);
+            if (!handled) return false;
+            reply.readException();
+            ipkNaviCallbackRegistered = true;
+            append("IPK navigation callback зарегистрирован");
+            return true;
+        } catch (Throwable error) {
+            appendFailure("IPK callback registration failed", error);
+            return false;
+        } finally {
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    private void unregisterIpkNaviCallback() {
+        if (ipkBinder == null || !ipkNaviCallbackRegistered) return;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(IPK_DESCRIPTOR);
+            data.writeStrongBinder(ipkNaviCallback);
+            if (ipkBinder.transact(TRANSACTION_UNREGISTER_NAVI_CALLBACK, data, reply, 0)) {
+                reply.readException();
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "IPK callback unregister failed", error);
+        } finally {
+            ipkNaviCallbackRegistered = false;
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    private boolean registerIpkKeyCallback() {
+        if (ipkBinder == null || ipkKeyCallbackRegistered) return ipkKeyCallbackRegistered;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(IPK_DESCRIPTOR);
+            data.writeStrongBinder(ipkKeyCallback);
+            boolean handled = ipkBinder.transact(
+                    TRANSACTION_REGISTER_IPK_KEY_CALLBACK, data, reply, 0);
+            if (!handled) return false;
+            reply.readException();
+            ipkKeyCallbackRegistered = true;
+            append("IPK instrument-key probe registered");
+            return true;
+        } catch (Throwable error) {
+            appendFailure("IPK instrument-key probe registration failed", error);
+            return false;
+        } finally {
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    private void unregisterIpkKeyCallback() {
+        if (ipkBinder == null || !ipkKeyCallbackRegistered) return;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(IPK_DESCRIPTOR);
+            data.writeStrongBinder(ipkKeyCallback);
+            if (ipkBinder.transact(
+                    TRANSACTION_UNREGISTER_IPK_KEY_CALLBACK, data, reply, 0)) {
+                reply.readException();
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "IPK instrument-key probe unregister failed", error);
+        } finally {
+            ipkKeyCallbackRegistered = false;
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    private void handleInstrumentNavigationRequest(int requestedMode) {
+        append("IPK onChangeNavi(" + requestedMode + ")");
+        if (!isAwdEnabled() || !shouldShowMapIdle()) {
+            append("Steering map launch ignored: instrument mode is not Map");
+            return;
+        }
+        if (requestedMode == IPK_REQUEST_FULL_SCREEN) {
+            launchYandexMapsOnInstrumentDisplay();
+        } else if (requestedMode == IPK_REQUEST_MINI) {
+            instrumentMapFullScreenActive = false;
+            syncFakeTeleNavInstrumentTbt();
+            dismissClusterGuidanceOverlay();
+            sendNeusoftNavigationState(false);
+            sendNavigationStatus(IPK_WIDGET_MAP_MODE, 3);
+            if (overlayRoot == null) showFullInstrumentOverlay();
+            append("Instrument map returned to MINI mode");
+        }
+    }
+
+    private void launchYandexMapsOnInstrumentDisplay() {
+        Display display = findInstrumentDisplay();
+        if (display == null) {
+            append("Yandex Navi launch failed: instrument display not found");
+            return;
+        }
+        Intent maps = createYandexInstrumentIntent();
+        if (maps == null) {
+            append("Yandex Navi launch failed: compatible package is not installed");
+            return;
+        }
+        maps.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        try {
+            instrumentMapFullScreenActive = true;
+            syncFakeTeleNavInstrumentTbt();
+            hideInstrumentOverlayForFullScreen();
+            sendNavigationStatus(2, 2);
+            ActivityOptions options = ActivityOptions.makeBasic()
+                    .setLaunchDisplayId(display.getDisplayId());
+            startActivity(maps, options.toBundle());
+            append("Yandex Navi cluster launched on displayId=" + display.getDisplayId());
+            overlayHandler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    applyYandexClusterLayout();
+                    showClusterGuidanceOverlay();
+                }
+            }, 700L);
+            // Maps can become the foreground task without taking ownership of our media
+            // shortcut. Refresh our silent, focus-free playback after the task switch so
+            // the second long press can bring the instrument panel back to MINI mode.
+            overlayHandler.postDelayed(new Runnable() {
+                @Override public void run() { refreshSteeringMediaPriority(); }
+            }, 500L);
+        } catch (Throwable error) {
+            instrumentMapFullScreenActive = false;
+            syncFakeTeleNavInstrumentTbt();
+            dismissClusterGuidanceOverlay();
+            appendFailure("Yandex Navi cluster launch failed", error);
+            sendNeusoftNavigationState(false);
+            sendNavigationStatus(IPK_WIDGET_MAP_MODE, 3);
+            restoreInstrumentOverlayVisibility();
+        }
+    }
+
+    private Intent createYandexInstrumentIntent() {
+        try {
+            getPackageManager().getPackageInfo(YANDEX_NAVI_PACKAGE, 0);
+            return new Intent(YANDEX_CLUSTER_ACTION)
+                    .setComponent(new ComponentName(
+                            YANDEX_NAVI_PACKAGE, YANDEX_CLUSTER_ACTIVITY));
+        } catch (PackageManager.NameNotFoundException ignored) {
+            Log.w(TAG, "Yandex Navigator package is not installed");
+        }
+        return null;
+    }
+
+    private void applyYandexClusterLayout() {
+        Intent layout = new Intent(YANDEX_CLUSTER_LAYOUT_ACTION)
+                .setPackage(YANDEX_NAVI_PACKAGE);
+        // b22 applies these values inside its cluster process. Keep route progress on
+        // the left and move the speed group away from the instrument centre opening.
+        layout.putExtra("area", 2);
+        layout.putExtra("GS_leftMargin", 1760);
+        layout.putExtra("GS_topMargin", 38);
+        layout.putExtra("FC_leftMargin", 24);
+        layout.putExtra("FC_bottomMargin", 18);
+        sendBroadcast(layout);
+        Log.i(TAG, "Yandex cluster layout profile sent");
+    }
+
+    private boolean isSteeringMapShortcutEnabled() {
+        return ENABLE_STEERING_MEDIA_SHORTCUT && isAwdEnabled() && shouldShowMapIdle();
+    }
+
+    private void toggleInstrumentMapFromModeKey() {
+        if (instrumentMapFullScreenActive) {
+            returnInstrumentMapToMini("Instrument mode key long press");
+        } else if (isAwdEnabled() && shouldShowMapIdle()) {
+            append("Instrument mode key long press: launching Yandex Maps");
+            launchYandexMapsOnInstrumentDisplay();
+        } else {
+            append("Instrument mode key long press ignored: widget or Map mode is disabled");
+        }
+    }
+
+    private void toggleInstrumentMapFromSteering() {
+        if (instrumentMapFullScreenActive) {
+            returnInstrumentMapToMini("Steering O long press");
+        } else if (isSteeringMapShortcutEnabled()) {
+            launchYandexMapsOnInstrumentDisplay();
+        }
+    }
+
+    private void returnInstrumentMapToMini(String source) {
+        instrumentMapFullScreenActive = false;
+        syncFakeTeleNavInstrumentTbt();
+        dismissClusterGuidanceOverlay();
+        append(source + ": returning instrument panel to MINI mode");
+        // Reproduce the verified off/on protocol sequence without destroying the
+        // MapKit view.  Recreating the secondary-display SurfaceView after full
+        // Yandex Maps left it attached but no longer producing fresh frames.
+        sendNeusoftNavigationState(false);
+        sendNavigationStatus(0, 5);
+        overlayHandler.postDelayed(new Runnable() {
+            @Override public void run() {
+                sendNavigationStatus(IPK_WIDGET_MAP_MODE, 3);
+                restoreInstrumentOverlayVisibility();
+                append("Instrument MINI overlay restored without MapKit restart");
+            }
+        }, 500L);
+    }
+
+    private void hideInstrumentOverlayForFullScreen() {
+        if (overlayRoot != null) {
+            overlayRoot.setVisibility(View.INVISIBLE);
+            append("Instrument MINI overlay hidden; MapKit kept alive");
+        }
+    }
+
+    private void restoreInstrumentOverlayVisibility() {
+        dismissClusterGuidanceOverlay();
+        if (!isAwdEnabled()) return;
+        if (overlayRoot == null) {
+            showFullInstrumentOverlay();
+            return;
+        }
+        overlayRoot.setVisibility(View.VISIBLE);
+        overlayRoot.invalidate();
+        if (overlayMapView != null) overlayMapView.invalidate();
+    }
+
+    private void showClusterGuidanceOverlay() {
+        if (!instrumentMapFullScreenActive) return;
+        Display display = findInstrumentDisplay();
+        if (display == null) return;
+        if (clusterGuidanceView != null) {
+            updateClusterGuidanceOverlay();
+            return;
+        }
+        Context displayContext = createDisplayContext(display);
+        clusterGuidanceWindowManager =
+                (WindowManager) displayContext.getSystemService(Context.WINDOW_SERVICE);
+        if (clusterGuidanceWindowManager == null) return;
+        clusterGuidanceView = new ClusterGuidanceView(displayContext);
+        int requestedWindowType = Build.VERSION.SDK_INT < Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY
+                : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                requestedWindowType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                android.graphics.PixelFormat.TRANSLUCENT);
+        params.gravity = Gravity.TOP | Gravity.START;
+        params.setTitle("Yandex cluster guidance");
+        try {
+            clusterGuidanceWindowManager.addView(clusterGuidanceView, params);
+            updateClusterGuidanceOverlay();
+            Log.i(TAG, "Cluster guidance overlay attached to displayId="
+                    + display.getDisplayId());
+        } catch (Throwable error) {
+            Log.w(TAG, "Cluster guidance overlay attach failed", error);
+            clusterGuidanceView = null;
+            clusterGuidanceWindowManager = null;
+        }
+    }
+
+    private void dismissClusterGuidanceOverlay() {
+        if (clusterGuidanceView != null && clusterGuidanceWindowManager != null) {
+            try {
+                clusterGuidanceWindowManager.removeViewImmediate(clusterGuidanceView);
+            } catch (Throwable error) {
+                Log.w(TAG, "Cluster guidance overlay removal failed", error);
+            }
+        }
+        clusterGuidanceView = null;
+        clusterGuidanceWindowManager = null;
+    }
+
+    private void updateClusterGuidanceOverlay() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            overlayHandler.post(new Runnable() {
+                @Override public void run() { updateClusterGuidanceOverlay(); }
+            });
+            return;
+        }
+        if (!instrumentMapFullScreenActive) return;
+        if (clusterGuidanceView == null) {
+            showClusterGuidanceOverlay();
+            return;
+        }
+        clusterGuidanceView.update(yandexManeuverResourceId, yandexNextRoadName,
+                yandexManeuverDistanceMeters, yandexRouteDistanceMeters,
+                yandexRouteTimeSeconds, yandexManeuverVisible,
+                getClusterManeuverPosition());
+    }
+
+    private int getClusterManeuverPosition() {
+        int position = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(
+                PREF_CLUSTER_MANEUVER_POSITION,
+                CLUSTER_MANEUVER_POSITION_UPPER_INNER);
+        return Math.max(0, Math.min(CLUSTER_MANEUVER_POSITION_NAMES.length - 1, position));
+    }
+
+    private void updateSteeringInputShortcut() {
+        if (!isSteeringMapShortcutEnabled()) {
+            releaseSteeringInputShortcut();
+            return;
+        }
+        if (steeringMediaSession == null) {
+            steeringMediaSession = new MediaSession(this, "InstrumentAwdSteering");
+            steeringMediaSession.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS
+                    | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS);
+            steeringMediaSession.setCallback(new MediaSession.Callback() {
+                @Override public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+                    KeyEvent event = mediaButtonIntent == null ? null
+                            : mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+                    if (event == null || (event.getKeyCode() != KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                            && event.getKeyCode() != KeyEvent.KEYCODE_HEADSETHOOK)) {
+                        return super.onMediaButtonEvent(mediaButtonIntent);
+                    }
+                    if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                        if (event.getRepeatCount() == 0) {
+                            steeringButtonDownMs = event.getEventTime();
+                            steeringLongPressHandled = false;
+                        } else if (!steeringLongPressHandled
+                                && steeringButtonDownMs > 0L
+                                && event.getEventTime() - steeringButtonDownMs
+                                >= STEERING_LONG_PRESS_MS) {
+                            steeringLongPressHandled = true;
+                            append("Steering O long press captured; toggling instrument map");
+                            toggleInstrumentMapFromSteering();
+                        }
+                    } else if (event.getAction() == KeyEvent.ACTION_UP) {
+                        long heldMs = steeringButtonDownMs > 0L
+                                ? event.getEventTime() - steeringButtonDownMs : 0L;
+                        if (!steeringLongPressHandled && heldMs >= STEERING_LONG_PRESS_MS) {
+                            steeringLongPressHandled = true;
+                            append("Steering O long press captured (" + heldMs
+                                    + " ms); toggling instrument map");
+                            toggleInstrumentMapFromSteering();
+                        } else if (!steeringLongPressHandled) {
+                            append("Steering O short press (" + heldMs
+                                    + " ms) left to stock music control");
+                        }
+                        steeringButtonDownMs = 0L;
+                        steeringLongPressHandled = false;
+                    }
+                    return true;
+                }
+            }, overlayHandler);
+            steeringMediaSession.setPlaybackState(new PlaybackState.Builder()
+                    .setActions(PlaybackState.ACTION_PLAY_PAUSE
+                            | PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE)
+                    .setState(PlaybackState.STATE_PLAYING, 0L, 1f)
+                    .build());
+        }
+        steeringMediaSession.setActive(true);
+        startSteeringSilentPlayback();
+    }
+
+    private void refreshSteeringMediaPriority() {
+        if (!instrumentMapFullScreenActive || !isAwdEnabled()
+                || steeringMediaSession == null) return;
+        try {
+            steeringMediaSession.setActive(false);
+            steeringMediaSession.setActive(true);
+        } catch (Throwable error) {
+            Log.w(TAG, "Steering MediaSession priority refresh failed", error);
+        }
+        releaseSteeringSilentPlayback();
+        startSteeringSilentPlayback();
+    }
+
+    private void startSteeringSilentPlayback() {
+        if (steeringSilentAudioTrack != null
+                && steeringSilentAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+            return;
+        }
+        releaseSteeringSilentPlayback();
+        try {
+            AudioAttributes attributes = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build();
+            AudioFormat format = new AudioFormat.Builder()
+                    .setSampleRate(STEERING_SILENT_SAMPLE_RATE)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                    .build();
+            int minimumBuffer = AudioTrack.getMinBufferSize(STEERING_SILENT_SAMPLE_RATE,
+                    AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT);
+            if (minimumBuffer <= 0) {
+                throw new IllegalStateException("invalid silent AudioTrack buffer=" + minimumBuffer);
+            }
+            final AudioTrack track = new AudioTrack(attributes, format, minimumBuffer,
+                    AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE);
+            if (track.getState() != AudioTrack.STATE_INITIALIZED) {
+                track.release();
+                throw new IllegalStateException("silent AudioTrack initialization failed");
+            }
+            track.setVolume(0f);
+            steeringSilentAudioTrack = track;
+            track.play();
+            final byte[] silence = new byte[minimumBuffer];
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    while (steeringSilentAudioTrack == track) {
+                        int written = track.write(
+                                silence, 0, silence.length, AudioTrack.WRITE_BLOCKING);
+                        if (written <= 0) break;
+                    }
+                }
+            }, "SteeringSilentAudio").start();
+            append("Steering media priority active with silent playback (no audio focus)");
+        } catch (Throwable error) {
+            appendFailure("Steering silent playback failed", error);
+        }
+    }
+
+    private void releaseSteeringSilentPlayback() {
+        if (steeringSilentAudioTrack == null) return;
+        AudioTrack track = steeringSilentAudioTrack;
+        steeringSilentAudioTrack = null;
+        try { track.stop(); }
+        catch (Throwable error) { Log.w(TAG, "Steering silent AudioTrack stop failed", error); }
+        try { track.release(); }
+        catch (Throwable error) { Log.w(TAG, "Steering silent AudioTrack release failed", error); }
+    }
+
+    private void releaseSteeringInputShortcut() {
+        steeringButtonDownMs = 0L;
+        steeringLongPressHandled = false;
+        releaseSteeringSilentPlayback();
+        if (steeringMediaSession != null) {
+            try { steeringMediaSession.setActive(false); }
+            catch (Throwable error) { Log.w(TAG, "Steering MediaSession stop failed", error); }
+            try { steeringMediaSession.release(); }
+            catch (Throwable error) { Log.w(TAG, "Steering MediaSession release failed", error); }
+            steeringMediaSession = null;
+        }
+        append("Steering media shortcut released");
+    }
+
+    private void sendNeusoftNavigationState(boolean started) {
+        Intent state = new Intent(NEUSOFT_NAVI_STATE_ACTION);
+        state.putExtra(NEUSOFT_NAVI_KEY_TYPE, NEUSOFT_NAVI_TYPE);
+        state.putExtra(NEUSOFT_NAVI_EXTRA_STATE,
+                started ? NEUSOFT_NAVI_START : NEUSOFT_NAVI_STOP);
+        sendBroadcast(state);
+        append("Neusoft navigation state="
+                + (started ? NEUSOFT_NAVI_START : NEUSOFT_NAVI_STOP));
     }
 
     private void setControlError(String message) {
@@ -1092,6 +2172,8 @@ public final class MainActivity extends Activity {
         lastLocation = null;
         courseAnchorLocation = null;
         lastLocationUpdateElapsedMs = 0L;
+        lastLocationGuardLogElapsedMs = 0L;
+        locationGuard.reset();
         lastCameraScanLogMs = 0L;
     }
 
@@ -1111,6 +2193,18 @@ public final class MainActivity extends Activity {
         SpeedCameraIndex index = cameraIndex;
         if (demoAlertActive) return;
         if (location != null) {
+            if (isGpsGuardEnabled()) {
+                LocationGuard.Result guardResult = locationGuard.filter(location);
+                if (!guardResult.isAccepted()) {
+                    long now = SystemClock.elapsedRealtime();
+                    if (now - lastLocationGuardLogElapsedMs >= 5000L) {
+                        lastLocationGuardLogElapsedMs = now;
+                        append("GPS Guard: точка отброшена (" + guardResult.reason + ")");
+                    }
+                    return;
+                }
+                location = guardResult.location;
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1
                     && location.getElapsedRealtimeNanos() > 0L) {
                 long ageMs = (SystemClock.elapsedRealtimeNanos()
@@ -1248,6 +2342,11 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private boolean isGpsGuardEnabled() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(PREF_CAMERA_GPS_GUARD, false);
+    }
+
     private boolean shouldShowSpeedCamera(SpeedCamera camera, Location location,
                                           boolean alertAlreadyActive) {
         int mode = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(
@@ -1266,6 +2365,9 @@ public final class MainActivity extends Activity {
         if (overlayView != null) {
             overlayView.updateCameraAlert(camera, distanceMeters);
         }
+        if (overlayMapView != null) {
+            overlayMapView.showCamera(camera);
+        }
         sendCameraHudAlert(camera, Math.max(0, Math.round(distanceMeters)));
     }
 
@@ -1275,6 +2377,7 @@ public final class MainActivity extends Activity {
         activeMinimumDistance = Float.MAX_VALUE;
         activeCameraDistanceBucket = -1;
         if (overlayView != null) overlayView.clearCameraAlert();
+        if (overlayMapView != null) overlayMapView.clearCamera();
     }
 
     private void sendCameraHudAlert(SpeedCamera camera, int distanceMeters) {
@@ -1298,6 +2401,7 @@ public final class MainActivity extends Activity {
         // Treat the camera as the temporary destination so the finish distance is meaningful.
         hud.putExtra("destDistance", distanceMeters);
         hud.putExtra("intervalMs", 1000L);
+        hud.putExtra("source", "camera");
         sendBroadcast(hud);
         hudCameraActive = true;
         lastHudCameraDistance = distanceMeters;
@@ -1314,11 +2418,15 @@ public final class MainActivity extends Activity {
         stop.setComponent(new ComponentName(
                 "com.telenav.app.arp", "com.telenav.app.receiver.BootReceiver"));
         stop.putExtra("mode", "STOP");
+        stop.putExtra("source", "camera");
         sendBroadcast(stop);
         hudCameraActive = false;
         lastHudCameraDistance = -1;
         lastHudCameraUpdateMs = 0L;
         Log.i(TAG, "HUD camera alert cleared");
+        // FakeTeleNav owns the persistent Navigator state and restores the latest
+        // maneuver after processing this camera-specific STOP command.
+        if (yandexManeuverVisible) scheduleHudNavigationTextRewrite();
     }
 
     private boolean isHudOutputAvailable() {
@@ -1365,6 +2473,43 @@ public final class MainActivity extends Activity {
             Log.d(TAG, "HUD metric distances written: " + distanceMeters + " m");
         } catch (Throwable error) {
             Log.w(TAG, "HUD metric distance override failed", error);
+        }
+    }
+
+    private void scheduleHudNavigationTextRewrite() {
+        if (!isHudOutputAvailable() || !yandexManeuverVisible
+                || yandexNextRoadName.trim().isEmpty()) return;
+        final int generation = ++hudNavigationTextGeneration;
+        long[] delaysMs = {180L, 520L};
+        for (final long delayMs : delaysMs) {
+            overlayHandler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (generation != hudNavigationTextGeneration || hudCameraActive
+                            || !yandexManeuverVisible) return;
+                    writeHudNavigationText(yandexNextRoadName);
+                }
+            }, delayMs);
+        }
+    }
+
+    private void writeHudNavigationText(String text) {
+        Object manager = vendorManager;
+        if (manager == null) {
+            Log.w(TAG, "HUD navigation text rewrite skipped: vendor_extension is not ready");
+            return;
+        }
+        try {
+            Method setProperty = manager.getClass().getMethod(
+                    "setProperty", Class.class, int.class, int.class, Object.class);
+            byte[][] frames = HudNavigationTextEncoder.encode(text);
+            for (byte[] frame : frames) {
+                setProperty.invoke(manager, byte[].class,
+                        PROP_HUD_NAVIGATION_TEXT, 0, frame);
+            }
+            Log.i(TAG, "HUD navigation text rewritten: '" + text
+                    + "' frames=" + frames.length);
+        } catch (Throwable error) {
+            Log.w(TAG, "HUD navigation text rewrite failed", error);
         }
     }
 
@@ -1528,7 +2673,7 @@ public final class MainActivity extends Activity {
     private void showDemoCameraAlert() {
         if (!isAwdEnabled()) enableAwdDisplay();
         demoAlertActive = true;
-        activeCamera = new SpeedCamera(-1, 0.0, 0.0, 1, 60, 0, 0);
+        activeCamera = createDemoCameraAhead();
         activeMinimumDistance = 350f;
         activeCameraDistanceBucket = 3;
         overlayHandler.removeCallbacks(clearDemoAlert);
@@ -1540,6 +2685,27 @@ public final class MainActivity extends Activity {
             }
         }, 1200L);
         overlayHandler.postDelayed(clearDemoAlert, 10000L);
+    }
+
+    private SpeedCamera createDemoCameraAhead() {
+        double latitude = lastLocation == null ? 47.2357 : lastLocation.getLatitude();
+        double longitude = lastLocation == null ? 39.7015 : lastLocation.getLongitude();
+        double bearing = lastLocation != null && lastLocation.hasBearing()
+                ? Math.toRadians(lastLocation.getBearing()) : 0.0;
+        double angularDistance = 140.0 / 6371000.0;
+        double latitudeRadians = Math.toRadians(latitude);
+        double longitudeRadians = Math.toRadians(longitude);
+        double targetLatitude = Math.asin(
+                Math.sin(latitudeRadians) * Math.cos(angularDistance)
+                        + Math.cos(latitudeRadians) * Math.sin(angularDistance)
+                        * Math.cos(bearing));
+        double targetLongitude = longitudeRadians + Math.atan2(
+                Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(latitudeRadians),
+                Math.cos(angularDistance)
+                        - Math.sin(latitudeRadians) * Math.sin(targetLatitude));
+        return new SpeedCamera(-1,
+                Math.toDegrees(targetLongitude), Math.toDegrees(targetLatitude),
+                1, 60, 1, (int) Math.round(Math.toDegrees(bearing)));
     }
 
     public static final class ControlReceiver extends BroadcastReceiver {
@@ -1834,6 +3000,7 @@ public final class MainActivity extends Activity {
                     appendFailure("Подписка отклонена для " + propertyId, error);
                 }
             }
+            if (yandexManeuverVisible) scheduleHudNavigationTextRewrite();
         } catch (Throwable error) {
             appendFailure("Не удалось открыть vendor_extension", error);
         }
@@ -1984,6 +3151,8 @@ public final class MainActivity extends Activity {
         if (overlayView != null) overlayView.setRadarIdle(radarIdle);
         if (presentation != null) presentation.setRadarIdle(radarIdle);
         updateInstrumentMapMode();
+        syncFakeTeleNavInstrumentTbt();
+        updateSteeringInputShortcut();
     }
 
     private void updateInstrumentMapMode() {
@@ -1999,6 +3168,7 @@ public final class MainActivity extends Activity {
             mapParams.leftMargin = 0;
             mapParams.topMargin = 0;
             overlayContentRoot.addView(overlayMapView, 0, mapParams);
+            if (activeCamera != null) overlayMapView.showCamera(activeCamera);
             append("Instrument mode: Yandex map 637x500 opaque top surface");
         } else if (!mapEnabled && overlayMapView != null) {
             overlayContentRoot.removeView(overlayMapView);
@@ -2051,16 +3221,21 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (activeInstance == this) activeInstance = null;
         overlayHandler.removeCallbacks(showPersistentOverlay);
         overlayHandler.removeCallbacks(clearDemoAlert);
         overlayHandler.removeCallbacks(cameraLocationWatchdog);
         stopCameraMonitoring();
         releaseAlertSound();
+        releaseSteeringInputShortcut();
+        dismissClusterGuidanceOverlay();
         dismissInstrumentOverlay();
         dismissPresentation();
         disconnectFromCarService();
         if (ipkBound) {
             try {
+                unregisterIpkKeyCallback();
+                unregisterIpkNaviCallback();
                 unbindService(ipkConnection);
             } catch (Throwable error) {
                 Log.w(TAG, "IPKService unbind failed", error);
@@ -2068,12 +3243,218 @@ public final class MainActivity extends Activity {
         }
         ipkBound = false;
         ipkBinder = null;
+        ipkKeyCallbackRegistered = false;
         if (locationReceiverRegistered) {
             try { unregisterReceiver(locationUpdateReceiver); }
             catch (Throwable error) { Log.w(TAG, "Location receiver removal failed", error); }
             locationReceiverRegistered = false;
         }
+        if (yandexGuidanceReceiverRegistered) {
+            try { unregisterReceiver(yandexGuidanceReceiver); }
+            catch (Throwable error) { Log.w(TAG, "Yandex guidance receiver removal failed", error); }
+            yandexGuidanceReceiverRegistered = false;
+        }
         super.onDestroy();
+    }
+
+    /** Transparent route chrome drawn above Yandex ClusterMapActivity only. */
+    private static final class ClusterGuidanceView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path arrow = new Path();
+        private String maneuverResourceId = "";
+        private String nextRoadName = "";
+        private int maneuverDistanceMeters;
+        private int routeDistanceMeters;
+        private int routeTimeSeconds;
+        private boolean maneuverVisible;
+        private int maneuverPosition;
+
+        ClusterGuidanceView(Context context) {
+            super(context);
+            setBackgroundColor(Color.TRANSPARENT);
+        }
+
+        void update(String resourceId, String roadName, int maneuverDistance,
+                    int routeDistance, int routeTime, boolean visible,
+                    int position) {
+            maneuverResourceId = resourceId == null ? "" : resourceId;
+            nextRoadName = roadName == null ? "" : roadName;
+            maneuverDistanceMeters = Math.max(0, maneuverDistance);
+            routeDistanceMeters = Math.max(0, routeDistance);
+            routeTimeSeconds = Math.max(0, routeTime);
+            maneuverVisible = visible;
+            maneuverPosition = position;
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float sx = getWidth() / 1920f;
+            float sy = getHeight() / 720f;
+            float scale = Math.max(0.75f, Math.min(sx, sy));
+            if (maneuverVisible && (!maneuverResourceId.isEmpty()
+                    || maneuverDistanceMeters > 0)) {
+                drawManeuverCard(canvas, scale);
+            }
+            if (routeDistanceMeters > 0 || routeTimeSeconds > 0) {
+                drawRouteProgress(canvas, scale);
+            }
+        }
+
+        private void drawManeuverCard(Canvas canvas, float scale) {
+            float x;
+            float y;
+            switch (maneuverPosition) {
+                case 1:
+                    x = 24f * scale;
+                    y = 26f * scale;
+                    break;
+                case 2:
+                    x = 24f * scale;
+                    y = 210f * scale;
+                    break;
+                case 3:
+                    x = 1488f * scale;
+                    y = 530f * scale;
+                    break;
+                case CLUSTER_MANEUVER_POSITION_UPPER_INNER:
+                default:
+                    x = 460f * scale;
+                    y = 26f * scale;
+                    break;
+            }
+            float width = 400f * scale;
+            float height = nextRoadName.isEmpty() ? 124f * scale : 154f * scale;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.argb(238, 17, 105, 224));
+            canvas.drawRoundRect(new RectF(x, y, x + width, y + height),
+                    22f * scale, 22f * scale, paint);
+
+            drawManeuverArrow(canvas, x + 58f * scale, y + 58f * scale, scale);
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextSize(43f * scale);
+            paint.setColor(Color.WHITE);
+            canvas.drawText(formatDistance(maneuverDistanceMeters),
+                    x + 112f * scale, y + 72f * scale, paint);
+            if (!nextRoadName.isEmpty()) {
+                paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.NORMAL));
+                paint.setTextSize(25f * scale);
+                paint.setColor(Color.argb(225, 255, 255, 255));
+                String road = ellipsize(nextRoadName, 23);
+                canvas.drawText(road, x + 24f * scale, y + 126f * scale, paint);
+            }
+        }
+
+        private void drawManeuverArrow(Canvas canvas, float cx, float cy, float scale) {
+            String id = maneuverResourceId.toLowerCase(Locale.US).replace('-', '_');
+            boolean left = id.contains("left");
+            boolean right = id.contains("right");
+            boolean uturn = id.contains("uturn") || id.contains("u_turn");
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(10f * scale);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+            paint.setColor(Color.WHITE);
+            arrow.reset();
+            if (uturn) {
+                float direction = right ? 1f : -1f;
+                arrow.moveTo(cx, cy + 31f * scale);
+                arrow.lineTo(cx, cy - 9f * scale);
+                arrow.quadTo(cx, cy - 34f * scale,
+                        cx + direction * 28f * scale, cy - 34f * scale);
+                arrow.lineTo(cx + direction * 42f * scale, cy - 34f * scale);
+                canvas.drawPath(arrow, paint);
+                drawArrowHead(canvas, cx + direction * 42f * scale,
+                        cy - 34f * scale, direction, 0f, scale);
+            } else if (left || right) {
+                float direction = right ? 1f : -1f;
+                arrow.moveTo(cx, cy + 34f * scale);
+                arrow.lineTo(cx, cy - 4f * scale);
+                arrow.lineTo(cx + direction * 34f * scale, cy - 34f * scale);
+                canvas.drawPath(arrow, paint);
+                drawArrowHead(canvas, cx + direction * 34f * scale,
+                        cy - 34f * scale, direction, -1f, scale);
+            } else {
+                canvas.drawLine(cx, cy + 34f * scale, cx, cy - 36f * scale, paint);
+                drawArrowHead(canvas, cx, cy - 36f * scale, 0f, -1f, scale);
+            }
+            paint.setStyle(Paint.Style.FILL);
+        }
+
+        private void drawArrowHead(Canvas canvas, float x, float y,
+                                   float dx, float dy, float scale) {
+            float length = (float) Math.sqrt(dx * dx + dy * dy);
+            if (length < 0.1f) return;
+            dx /= length;
+            dy /= length;
+            float px = -dy;
+            float py = dx;
+            float back = 22f * scale;
+            float wing = 13f * scale;
+            arrow.reset();
+            arrow.moveTo(x, y);
+            arrow.lineTo(x - dx * back + px * wing, y - dy * back + py * wing);
+            arrow.moveTo(x, y);
+            arrow.lineTo(x - dx * back - px * wing, y - dy * back - py * wing);
+            canvas.drawPath(arrow, paint);
+        }
+
+        private void drawRouteProgress(Canvas canvas, float scale) {
+            float x = 24f * scale;
+            float y = 625f * scale;
+            float width = 530f * scale;
+            float height = 69f * scale;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.argb(220, 25, 27, 31));
+            canvas.drawRoundRect(new RectF(x, y, x + width, y + height),
+                    18f * scale, 18f * scale, paint);
+
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextSize(29f * scale);
+            paint.setColor(Color.WHITE);
+            String distance = routeDistanceMeters > 0
+                    ? formatDistance(routeDistanceMeters) : "—";
+            String duration = routeTimeSeconds > 0
+                    ? formatDuration(routeTimeSeconds) : "—";
+            canvas.drawText(distance + "   " + duration,
+                    x + 28f * scale, y + 44f * scale, paint);
+
+            if (routeTimeSeconds > 0) {
+                long arrivalMs = System.currentTimeMillis() + routeTimeSeconds * 1000L;
+                java.text.SimpleDateFormat timeFormat =
+                        new java.text.SimpleDateFormat("HH:mm", Locale.getDefault());
+                String eta = timeFormat.format(new java.util.Date(arrivalMs));
+                paint.setTextAlign(Paint.Align.RIGHT);
+                paint.setColor(Color.argb(220, 255, 255, 255));
+                canvas.drawText(eta, x + width - 26f * scale, y + 44f * scale, paint);
+                paint.setTextAlign(Paint.Align.LEFT);
+            }
+            paint.setColor(Color.rgb(54, 196, 95));
+            canvas.drawRoundRect(new RectF(x + 15f * scale, y + height - 7f * scale,
+                    x + width - 15f * scale, y + height - 3f * scale),
+                    2f * scale, 2f * scale, paint);
+        }
+
+        private static String formatDistance(int meters) {
+            if (meters >= 10000) return Math.round(meters / 1000f) + " км";
+            if (meters >= 1000) {
+                return String.format(Locale.getDefault(), "%.1f км", meters / 1000f);
+            }
+            return meters + " м";
+        }
+
+        private static String formatDuration(int seconds) {
+            int minutes = Math.max(1, (int) Math.ceil(seconds / 60d));
+            if (minutes < 60) return minutes + " мин";
+            int hours = minutes / 60;
+            int rest = minutes % 60;
+            return rest == 0 ? hours + " ч" : hours + " ч " + rest + " мин";
+        }
+
+        private static String ellipsize(String value, int maxChars) {
+            if (value == null || value.length() <= maxChars) return value == null ? "" : value;
+            return value.substring(0, Math.max(1, maxChars - 1)) + "…";
+        }
     }
 
     private static final class AwdPresentation extends Presentation {
