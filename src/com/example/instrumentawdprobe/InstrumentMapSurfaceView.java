@@ -3,9 +3,15 @@ package com.example.instrumentawdprobe;
 import android.app.Application;
 import android.content.Context;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.PointF;
+import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.util.Log;
 import android.view.SurfaceView;
 import android.view.View;
@@ -15,10 +21,15 @@ import android.widget.FrameLayout;
 import com.yandex.mapkit.Animation;
 import com.yandex.mapkit.geometry.Point;
 import com.yandex.mapkit.map.CameraPosition;
+import com.yandex.mapkit.map.IconStyle;
+import com.yandex.mapkit.map.MapObjectCollection;
 import com.yandex.mapkit.map.MapWindow;
+import com.yandex.mapkit.map.PlacemarkMapObject;
+import com.yandex.mapkit.map.RotationType;
 import com.yandex.mapkit.mapview.MapView;
 import com.yandex.mapkit.traffic.TrafficLayer;
 import com.yandex.mapkit.user_location.UserLocationLayer;
+import com.yandex.runtime.image.ImageProvider;
 
 /**
  * Hosts a regular MapKit MapView in the display-specific instrument window.
@@ -29,10 +40,15 @@ final class InstrumentMapSurfaceView extends FrameLayout {
     private static final String TAG = "InstrumentMapView";
     private static final Point ROSTOV = new Point(47.2357, 39.7015);
     private static final float INITIAL_ZOOM = 15f;
+    private static final int CAMERA_MARKER_WIDTH = 96;
+    private static final int CAMERA_MARKER_HEIGHT = 112;
 
     private final MapView mapView;
+    private MapWindow mapWindow;
     private UserLocationLayer userLocationLayer;
     private TrafficLayer trafficLayer;
+    private PlacemarkMapObject cameraPlacemark;
+    private int displayedCameraId = Integer.MIN_VALUE;
     private boolean mapKitAcquired;
     private boolean mapViewStarted;
 
@@ -55,7 +71,8 @@ final class InstrumentMapSurfaceView extends FrameLayout {
         addView(mapView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
-        configureMap(mapView.getMapWindow());
+        mapWindow = mapView.getMapWindow();
+        configureMap(mapWindow);
     }
 
     private static void promoteOpaqueSurfaces(View view) {
@@ -96,6 +113,114 @@ final class InstrumentMapSurfaceView extends FrameLayout {
         Log.i(TAG, "Instrument MapView configured night=" + night + " traffic=true");
     }
 
+    void showCamera(SpeedCamera camera) {
+        if (mapWindow == null || camera == null
+                || camera.latitude < -90.0 || camera.latitude > 90.0
+                || camera.longitude < -180.0 || camera.longitude > 180.0) {
+            clearCamera();
+            return;
+        }
+        Point cameraPoint = new Point(camera.latitude, camera.longitude);
+        if (cameraPlacemark != null && cameraPlacemark.isValid()
+                && displayedCameraId == camera.id) {
+            cameraPlacemark.setGeometry(cameraPoint);
+            return;
+        }
+        clearCamera();
+        MapObjectCollection objects = mapWindow.getMap().getMapObjects();
+        IconStyle style = new IconStyle()
+                .setAnchor(new PointF(0.5f, 1.0f))
+                .setRotationType(RotationType.NO_ROTATION)
+                .setFlat(false)
+                .setScale(1.0f)
+                .setZIndex(100f)
+                .setOpacity(1.0f);
+        cameraPlacemark = objects.addPlacemark(
+                cameraPoint,
+                ImageProvider.fromBitmap(createCameraMarker(camera)),
+                style);
+        cameraPlacemark.setZIndex(100f);
+        displayedCameraId = camera.id;
+        Log.i(TAG, "Camera marker shown id=" + camera.id
+                + " speed=" + camera.speed
+                + " lat=" + camera.latitude + " lon=" + camera.longitude);
+    }
+
+    void clearCamera() {
+        if (cameraPlacemark != null) {
+            try {
+                if (cameraPlacemark.isValid()) {
+                    cameraPlacemark.getParent().remove(cameraPlacemark);
+                }
+            } catch (RuntimeException error) {
+                Log.w(TAG, "Unable to remove camera marker", error);
+            }
+        }
+        cameraPlacemark = null;
+        displayedCameraId = Integer.MIN_VALUE;
+    }
+
+    private static Bitmap createCameraMarker(SpeedCamera camera) {
+        Bitmap bitmap = Bitmap.createBitmap(
+                CAMERA_MARKER_WIDTH, CAMERA_MARKER_HEIGHT, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+
+        float centerX = CAMERA_MARKER_WIDTH * 0.5f;
+        float centerY = 44f;
+        float radius = 36f;
+
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(Color.argb(105, 0, 0, 0));
+        canvas.drawCircle(centerX + 2f, centerY + 4f, radius + 5f, paint);
+        Path shadowPointer = new Path();
+        shadowPointer.moveTo(centerX - 12f, 72f);
+        shadowPointer.lineTo(centerX + 3f, 108f);
+        shadowPointer.lineTo(centerX + 15f, 72f);
+        shadowPointer.close();
+        canvas.drawPath(shadowPointer, paint);
+
+        paint.setColor(Color.rgb(248, 245, 237));
+        Path pointer = new Path();
+        pointer.moveTo(centerX - 12f, 70f);
+        pointer.lineTo(centerX, 105f);
+        pointer.lineTo(centerX + 12f, 70f);
+        pointer.close();
+        canvas.drawPath(pointer, paint);
+        canvas.drawCircle(centerX, centerY, radius, paint);
+
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(7f);
+        paint.setColor(Color.rgb(213, 91, 70));
+        canvas.drawCircle(centerX, centerY, radius - 3.5f, paint);
+
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(Color.rgb(22, 22, 21));
+        paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        paint.setTextAlign(Paint.Align.CENTER);
+        if (camera.speed > 0) {
+            String speed = String.valueOf(camera.speed);
+            paint.setTextSize(speed.length() >= 3 ? 25f : 30f);
+            Paint.FontMetrics metrics = paint.getFontMetrics();
+            float baseline = centerY - (metrics.ascent + metrics.descent) * 0.5f;
+            canvas.drawText(speed, centerX, baseline, paint);
+        } else {
+            RectF body = new RectF(centerX - 22f, centerY - 13f,
+                    centerX + 16f, centerY + 14f);
+            canvas.drawRoundRect(body, 5f, 5f, paint);
+            Path lens = new Path();
+            lens.moveTo(centerX + 16f, centerY - 8f);
+            lens.lineTo(centerX + 29f, centerY - 15f);
+            lens.lineTo(centerX + 29f, centerY + 15f);
+            lens.lineTo(centerX + 16f, centerY + 8f);
+            lens.close();
+            canvas.drawPath(lens, paint);
+            paint.setColor(Color.rgb(248, 245, 237));
+            canvas.drawCircle(centerX - 4f, centerY, 7f, paint);
+        }
+        return bitmap;
+    }
+
     @Override protected void onAttachedToWindow() {
         super.onAttachedToWindow();
         if (mapView != null && !mapViewStarted) {
@@ -122,12 +247,14 @@ final class InstrumentMapSurfaceView extends FrameLayout {
     }
 
     @Override protected void onDetachedFromWindow() {
+        clearCamera();
         if (mapView != null && mapViewStarted) {
             mapView.onStop();
             mapViewStarted = false;
         }
         trafficLayer = null;
         userLocationLayer = null;
+        mapWindow = null;
         if (mapKitAcquired) {
             mapKitAcquired = false;
             RoadAssistantApplication.releaseMapKit();

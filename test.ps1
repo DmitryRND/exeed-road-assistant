@@ -75,11 +75,13 @@ $sources = @(
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\AlertSoundGenerator.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\CameraDatabaseUpdate.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\HudDistanceEncoder.java'),
+    (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\HudNavigationTextEncoder.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\SpeedCamera.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\SpeedCameraIndex.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\AlertSoundGeneratorTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\CameraDatabaseUpdateTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\HudDistanceEncoderTest.java'),
+    (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\HudNavigationTextEncoderTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\SpeedCameraIndexTest.java')
 )
 & $javac -encoding UTF-8 -source 8 -target 8 -cp $androidJar -d $classes $sources
@@ -93,6 +95,10 @@ if ($LASTEXITCODE -ne 0) { throw "tests failed: $LASTEXITCODE" }
 & $java -cp "$classes;$androidJar" `
     'com.example.instrumentawdprobe.HudDistanceEncoderTest'
 if ($LASTEXITCODE -ne 0) { throw "HUD distance tests failed: $LASTEXITCODE" }
+
+& $java -cp "$classes;$androidJar" `
+    'com.example.instrumentawdprobe.HudNavigationTextEncoderTest'
+if ($LASTEXITCODE -ne 0) { throw "HUD navigation text tests failed: $LASTEXITCODE" }
 
 $cameraUpdateTestRoot = Join-Path $testRoot 'camera-update'
 & $java -cp "$classes;$androidJar" `
