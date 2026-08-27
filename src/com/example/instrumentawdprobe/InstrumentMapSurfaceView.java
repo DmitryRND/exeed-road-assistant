@@ -20,6 +20,7 @@ import android.widget.FrameLayout;
 
 import com.yandex.mapkit.Animation;
 import com.yandex.mapkit.geometry.Point;
+import com.yandex.mapkit.geometry.Polyline;
 import com.yandex.mapkit.map.CameraPosition;
 import com.yandex.mapkit.map.IconStyle;
 import com.yandex.mapkit.map.MapObjectCollection;
@@ -30,6 +31,9 @@ import com.yandex.mapkit.mapview.MapView;
 import com.yandex.mapkit.traffic.TrafficLayer;
 import com.yandex.mapkit.user_location.UserLocationLayer;
 import com.yandex.runtime.image.ImageProvider;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Hosts a regular MapKit MapView in the display-specific instrument window.
@@ -47,6 +51,7 @@ final class InstrumentMapSurfaceView extends FrameLayout {
     private MapWindow mapWindow;
     private UserLocationLayer userLocationLayer;
     private TrafficLayer trafficLayer;
+    private MapObjectCollection navigatorRouteCollection;
     private PlacemarkMapObject cameraPlacemark;
     private int displayedCameraId = Integer.MIN_VALUE;
     private boolean mapKitAcquired;
@@ -110,7 +115,63 @@ final class InstrumentMapSurfaceView extends FrameLayout {
         trafficLayer = com.yandex.mapkit.MapKitFactory.getInstance()
                 .createTrafficLayer(mapWindow);
         trafficLayer.setTrafficVisible(true);
+        navigatorRouteCollection = mapWindow.getMap().getMapObjects().addCollection();
         Log.i(TAG, "Instrument MapView configured night=" + night + " traffic=true");
+    }
+
+    /** Applies the active polyline exported by the patched Yandex Navigator. */
+    void updateNavigatorRoute(String encodedPoints) {
+        if (navigatorRouteCollection == null) return;
+        List<Point> points = parseNavigatorPoints(encodedPoints);
+        navigatorRouteCollection.clear();
+        if (points.size() < 2) {
+            Log.i(TAG, "Navigator route cleared: no valid geometry");
+            return;
+        }
+        com.yandex.mapkit.map.PolylineMapObject route =
+                navigatorRouteCollection.addPolyline(new Polyline(points));
+        route.setZIndex(20f);
+        route.setStrokeColor(Color.rgb(66, 115, 255));
+        route.setStrokeWidth(9f);
+        route.setOutlineColor(Color.argb(210, 30, 30, 34));
+        route.setOutlineWidth(3f);
+        Log.i(TAG, "Navigator route shown points=" + points.size());
+    }
+
+    void clearNavigatorRoute() {
+        if (navigatorRouteCollection != null) navigatorRouteCollection.clear();
+    }
+
+    void updateNavigatorPosition(double latitude, double longitude, float heading) {
+        if (mapWindow == null || latitude < -90d || latitude > 90d
+                || longitude < -180d || longitude > 180d) return;
+        CameraPosition current = mapWindow.getMap().getCameraPosition();
+        mapWindow.getMap().move(new CameraPosition(
+                new Point(latitude, longitude),
+                Math.max(16f, current.getZoom()),
+                Float.isNaN(heading) ? current.getAzimuth() : heading,
+                Math.max(30f, current.getTilt())));
+    }
+
+    private static List<Point> parseNavigatorPoints(String encodedPoints) {
+        List<Point> points = new ArrayList<>();
+        if (encodedPoints == null || encodedPoints.trim().isEmpty()) return points;
+        String[] encoded = encodedPoints.split(";");
+        for (String item : encoded) {
+            String[] fields = item.split(",");
+            if (fields.length != 2) continue;
+            try {
+                double latitude = Double.parseDouble(fields[0].trim());
+                double longitude = Double.parseDouble(fields[1].trim());
+                if (latitude >= -90d && latitude <= 90d
+                        && longitude >= -180d && longitude <= 180d) {
+                    points.add(new Point(latitude, longitude));
+                }
+            } catch (NumberFormatException ignored) {
+                // Ignore one malformed point while preserving the valid route tail.
+            }
+        }
+        return points;
     }
 
     void showCamera(SpeedCamera camera) {
@@ -254,6 +315,7 @@ final class InstrumentMapSurfaceView extends FrameLayout {
         }
         trafficLayer = null;
         userLocationLayer = null;
+        navigatorRouteCollection = null;
         mapWindow = null;
         if (mapKitAcquired) {
             mapKitAcquired = false;

@@ -50,17 +50,18 @@ import android.view.Display;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.ScrollView;
 import android.widget.Spinner;
+import android.widget.Switch;
 import android.widget.TextView;
 
 import java.io.File;
@@ -96,9 +97,12 @@ public final class MainActivity extends Activity {
     private static final String PREF_IDLE_MODE = "idle_mode";
     private static final String PREF_CLUSTER_MANEUVER_POSITION =
             "cluster_maneuver_position";
+    private static final String PREF_NAVIGATION_HUD = "navigation_hud";
     private static final String PREF_INSTRUMENT_TBT = "instrument_tbt";
     private static final String PREF_MEDIA_BRIDGE_AUTO_PLAY = "media_bridge_auto_play";
     private static final String PREF_MEDIA_BRIDGE_ROUTE_CARD = "media_bridge_route_card";
+    private static final String PREF_MEDIA_BRIDGE_NAV_CONTROLS =
+            "media_bridge_nav_controls";
     private static final String PREF_CAMERA_ETAG = "camera_etag";
     private static final String PREF_CAMERA_LAST_MODIFIED = "camera_last_modified";
     private static final int CAMERA_DISTANCE_CITY_METERS = 400;
@@ -137,14 +141,17 @@ public final class MainActivity extends Activity {
     private static final int CAMERA_WARNING_OVERSPEED = 1;
     private static final float OVERSPEED_ACTIVATION_MARGIN_KMH = 2f;
     private static final String[] IDLE_MODE_NAMES = {
-            "Авто", "Полный привод", "Радар", "Карта"
+            "Полный привод", "Заглушка", "Антирадар", "Маршрут"
     };
-    private static final int IDLE_MODE_AUTO = 0;
+    // Preserve the stored values used by previous versions while presenting the
+    // four owner-facing modes in their requested order.
+    private static final int[] IDLE_MODE_VALUES = {1, 0, 2, 3};
+    private static final int IDLE_MODE_BLANK = 0;
     private static final int IDLE_MODE_AWD = 1;
     private static final int IDLE_MODE_RADAR = 2;
-    private static final int IDLE_MODE_MAP = 3;
+    private static final int IDLE_MODE_ROUTE = 3;
     private static final String[] CLUSTER_MANEUVER_POSITION_NAMES = {
-            "Сверху, левее центра", "Сверху слева", "Слева ниже", "Снизу справа"
+            "Сверху справа, над скоростью", "Сверху слева", "Слева ниже", "Снизу справа"
     };
     private static final int CLUSTER_MANEUVER_POSITION_UPPER_INNER = 0;
 
@@ -183,6 +190,7 @@ public final class MainActivity extends Activity {
     private static final String YANDEX_NAV_MAP_ACTION = "Y.nav.map";
     private static final String YANDEX_CLUSTER_LAYOUT_ACTION = "Y.lay.guide";
     private static final String TELENAV_ACTION = "com.telenav.app.START";
+    private static final String TELENAV_EXTRA_HUD_ENABLED = "hudEnabled";
     private static final String TELENAV_EXTRA_PANEL_TBT_ENABLED = "panelTbtEnabled";
     private static final ComponentName TELENAV_RECEIVER = new ComponentName(
             "com.telenav.app.arp", "com.telenav.app.receiver.BootReceiver");
@@ -198,8 +206,12 @@ public final class MainActivity extends Activity {
             "ru.exeed.yandexmediabridge.extra.AUTO_PLAY_ENABLED";
     private static final String MEDIA_BRIDGE_ACTION_SET_ROUTE_CARD =
             "ru.exeed.yandexmediabridge.action.SET_LAUNCHER_ROUTE_CARD";
+    private static final String MEDIA_BRIDGE_ACTION_SET_NAV_CONTROLS =
+            "ru.exeed.yandexmediabridge.action.SET_NAVIGATOR_CORNER_CONTROLS";
     private static final String MEDIA_BRIDGE_EXTRA_ROUTE_CARD =
             "ru.exeed.yandexmediabridge.extra.LAUNCHER_ROUTE_CARD_ENABLED";
+    private static final String MEDIA_BRIDGE_EXTRA_NAV_CONTROLS =
+            "ru.exeed.yandexmediabridge.extra.NAVIGATOR_CORNER_CONTROLS_ENABLED";
     private static final String NEUSOFT_NAVI_STATE_ACTION =
             "AUTONAVI_STANDARD_BROADCAST_SEND";
     private static final String NEUSOFT_NAVI_KEY_TYPE = "KEY_TYPE";
@@ -235,13 +247,15 @@ public final class MainActivity extends Activity {
     private Button disableButton;
     private Spinner idleModeSpinner;
     private Spinner clusterManeuverPositionSpinner;
-    private CheckBox cameraAudioCheck;
-    private CheckBox cameraHudCheck;
-    private CheckBox cameraGpsGuardCheck;
-    private CheckBox autostartCheck;
-    private CheckBox mediaBridgeAutoPlayCheck;
-    private CheckBox mediaBridgeRouteCardCheck;
-    private CheckBox instrumentTbtCheck;
+    private Switch cameraAudioCheck;
+    private Switch cameraHudCheck;
+    private Switch cameraGpsGuardCheck;
+    private Switch autostartCheck;
+    private Switch mediaBridgeAutoPlayCheck;
+    private Switch mediaBridgeRouteCardCheck;
+    private Switch mediaBridgeNavigationControlsCheck;
+    private Switch navigationHudCheck;
+    private Switch instrumentTbtCheck;
     private TextView mediaBridgeStatusView;
     private Spinner cameraSoundSpinner;
     private Spinner cameraWarningModeSpinner;
@@ -255,6 +269,8 @@ public final class MainActivity extends Activity {
     private FrameLayout overlayContentRoot;
     private AwdView overlayView;
     private InstrumentMapSurfaceView overlayMapView;
+    private WindowManager miniRouteGuidanceWindowManager;
+    private MiniRouteGuidanceView overlayRouteGuidanceView;
     private WindowManager clusterGuidanceWindowManager;
     private ClusterGuidanceView clusterGuidanceView;
     private Object car;
@@ -280,6 +296,11 @@ public final class MainActivity extends Activity {
     private int yandexRouteDistanceMeters;
     private int yandexRouteTimeSeconds;
     private boolean yandexManeuverVisible;
+    private String yandexRoutePoints = "";
+    private double yandexNavigationLatitude = Double.NaN;
+    private double yandexNavigationLongitude = Double.NaN;
+    private float yandexNavigationHeading = Float.NaN;
+    private long lastYandexNavigationUpdateElapsedMs;
     private int hudNavigationTextGeneration;
     private long lastCameraScanLogMs;
     private SpeedCamera activeCamera;
@@ -410,16 +431,49 @@ public final class MainActivity extends Activity {
         @Override public void onReceive(Context context, Intent intent) {
             if (intent == null) return;
             String action = intent.getAction();
+            long nowElapsedMs = SystemClock.elapsedRealtime();
+            if (NavigatorRouteFreshnessPolicy.isExpired(hasYandexNavigationState(),
+                    lastYandexNavigationUpdateElapsedMs, nowElapsedMs)) {
+                clearYandexNavigationState("Stale Navigator route cleared before new update");
+            }
+            lastYandexNavigationUpdateElapsedMs = nowElapsedMs;
             if (YANDEX_MANEUVER_VISIBILITY_ACTION.equals(action)) {
                 yandexManeuverVisible = intent.getBooleanExtra("Visible", false);
-                if (yandexManeuverVisible) scheduleHudNavigationTextRewrite();
-                updateClusterGuidanceOverlay();
+                updateNavigationGuidanceViews();
                 return;
             }
             if (YANDEX_NAV_MAP_ACTION.equals(action)) {
+                String type = stringExtra(intent, "type");
+                if ("route".equals(type)) {
+                    if (intent.getBooleanExtra("clear", false)) {
+                        yandexRoutePoints = "";
+                        if (overlayMapView != null) overlayMapView.clearNavigatorRoute();
+                    } else if (intent.hasExtra("points")) {
+                        yandexRoutePoints = stringExtra(intent, "points");
+                        if (overlayMapView != null) {
+                            overlayMapView.updateNavigatorRoute(yandexRoutePoints);
+                        }
+                    }
+                } else if ("position".equals(type)
+                        && intent.hasExtra("lat") && intent.hasExtra("lon")) {
+                    yandexNavigationLatitude = intent.getDoubleExtra("lat", Double.NaN);
+                    yandexNavigationLongitude = intent.getDoubleExtra("lon", Double.NaN);
+                    Object heading = intent.getExtras() == null
+                            ? null : intent.getExtras().get("heading");
+                    try {
+                        yandexNavigationHeading = heading == null
+                                ? Float.NaN : Float.parseFloat(String.valueOf(heading));
+                    } catch (NumberFormatException ignored) {
+                        yandexNavigationHeading = Float.NaN;
+                    }
+                    if (overlayMapView != null) {
+                        overlayMapView.updateNavigatorPosition(yandexNavigationLatitude,
+                                yandexNavigationLongitude, yandexNavigationHeading);
+                    }
+                }
                 if (intent.getBooleanExtra("clear", false)) {
-                    yandexRouteDistanceMeters = 0;
-                    yandexRouteTimeSeconds = 0;
+                    clearYandexNavigationState("Navigator route cleared");
+                    return;
                 } else {
                     if (intent.hasExtra("distanceToFinish")) {
                         yandexRouteDistanceMeters = Math.max(0,
@@ -430,7 +484,7 @@ public final class MainActivity extends Activity {
                                 (int) Math.round(intent.getDoubleExtra("timeToFinish", 0d)));
                     }
                 }
-                updateClusterGuidanceOverlay();
+                updateNavigationGuidanceViews();
                 return;
             }
             if (!YANDEX_MANEUVER_ACTION.equals(action)) return;
@@ -439,7 +493,6 @@ public final class MainActivity extends Activity {
             }
             if (intent.hasExtra("nextRoadName")) {
                 yandexNextRoadName = stringExtra(intent, "nextRoadName");
-                scheduleHudNavigationTextRewrite();
             }
             if (intent.hasExtra("distance") || intent.hasExtra("unit")) {
                 yandexManeuverDistanceMeters = parseYandexDistanceMeters(
@@ -455,7 +508,7 @@ public final class MainActivity extends Activity {
                 Log.i(TAG, "Yandex guidance received for instrument overlay; "
                         + "persistent HUD forwarding is owned by FakeTeleNav");
             }
-            updateClusterGuidanceOverlay();
+            updateNavigationGuidanceViews();
         }
     };
     private final Runnable cameraLocationWatchdog = new Runnable() {
@@ -475,6 +528,16 @@ public final class MainActivity extends Activity {
             overlayHandler.postDelayed(this, CAMERA_LOCATION_WATCHDOG_MS);
         }
     };
+    private final Runnable navigatorRouteFreshnessWatchdog = new Runnable() {
+        @Override public void run() {
+            if (NavigatorRouteFreshnessPolicy.isExpired(hasYandexNavigationState(),
+                    lastYandexNavigationUpdateElapsedMs, SystemClock.elapsedRealtime())) {
+                clearYandexNavigationState("Navigator route updates timed out");
+            }
+            overlayHandler.postDelayed(this,
+                    NavigatorRouteFreshnessPolicy.WATCHDOG_INTERVAL_MS);
+        }
+    };
 
     private final ServiceConnection ipkConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder service) {
@@ -484,7 +547,7 @@ public final class MainActivity extends Activity {
             registerIpkNaviCallback();
             registerIpkKeyCallback();
             flushPendingNavigationMode();
-            if (yandexManeuverVisible) sendYandexManeuverToHud(false);
+            syncFakeTeleNavNavigationOutputs();
         }
 
         @Override public void onServiceDisconnected(ComponentName name) {
@@ -527,6 +590,9 @@ public final class MainActivity extends Activity {
         guidanceFilter.addAction(YANDEX_NAV_MAP_ACTION);
         registerReceiver(yandexGuidanceReceiver, guidanceFilter);
         yandexGuidanceReceiverRegistered = true;
+        overlayHandler.removeCallbacks(navigatorRouteFreshnessWatchdog);
+        overlayHandler.postDelayed(navigatorRouteFreshnessWatchdog,
+                NavigatorRouteFreshnessPolicy.WATCHDOG_INTERVAL_MS);
         buildControlUi();
         registerInstrumentModeRpcProbe();
         refreshBatteryInfo();
@@ -678,9 +744,9 @@ public final class MainActivity extends Activity {
         root.addView(batteryRefreshButton, controlButtonParams());
 
         final SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
-        autostartCheck = new CheckBox(this);
+        autostartCheck = new Switch(this);
         autostartCheck.setText("Автозапуск при включении автомобиля");
-        autostartCheck.setTextSize(18f);
+        autostartCheck.setTextSize(21f);
         autostartCheck.setTextColor(Color.rgb(52, 52, 50));
         autostartCheck.setPadding(0, dp(4), 0, dp(8));
         autostartCheck.setChecked(preferences.getBoolean(PREF_AUTOSTART, false));
@@ -690,12 +756,12 @@ public final class MainActivity extends Activity {
                         .putBoolean(PREF_AUTOSTART, autostartCheck.isChecked()).apply();
             }
         });
-        root.addView(autostartCheck, matchWrap());
+        addSettingsCheckBox(root, autostartCheck);
 
         TextView homeScreenTitle = new TextView(this);
         homeScreenTitle.setText("Главный экран и Яндекс Музыка");
         homeScreenTitle.setTextColor(Color.rgb(31, 32, 31));
-        homeScreenTitle.setTextSize(22f);
+        homeScreenTitle.setTextSize(26f);
         homeScreenTitle.setPadding(0, dp(18), 0, dp(8));
         root.addView(homeScreenTitle, matchWrap());
 
@@ -703,12 +769,12 @@ public final class MainActivity extends Activity {
         mediaBridgeStatusView.setText(isMediaBridgeInstalled()
                 ? "Media Bridge установлен; отдельная иконка скрыта"
                 : "Media Bridge не установлен");
-        mediaBridgeStatusView.setTextSize(16f);
+        mediaBridgeStatusView.setTextSize(18f);
         mediaBridgeStatusView.setTextColor(Color.rgb(104, 103, 98));
         mediaBridgeStatusView.setPadding(0, 0, 0, dp(6));
         root.addView(mediaBridgeStatusView, matchWrap());
 
-        mediaBridgeAutoPlayCheck = new CheckBox(this);
+        mediaBridgeAutoPlayCheck = new Switch(this);
         mediaBridgeAutoPlayCheck.setText("Запускать Яндекс Музыку после загрузки");
         mediaBridgeAutoPlayCheck.setTextSize(18f);
         mediaBridgeAutoPlayCheck.setTextColor(Color.rgb(52, 52, 50));
@@ -723,9 +789,9 @@ public final class MainActivity extends Activity {
                 sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_AUTO_PLAY, enabled);
             }
         });
-        root.addView(mediaBridgeAutoPlayCheck, matchWrap());
+        addSettingsCheckBox(root, mediaBridgeAutoPlayCheck);
 
-        mediaBridgeRouteCardCheck = new CheckBox(this);
+        mediaBridgeRouteCardCheck = new Switch(this);
         mediaBridgeRouteCardCheck.setText("Показывать активный маршрут на главном экране");
         mediaBridgeRouteCardCheck.setTextSize(18f);
         mediaBridgeRouteCardCheck.setTextColor(Color.rgb(52, 52, 50));
@@ -740,9 +806,36 @@ public final class MainActivity extends Activity {
                 sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_ROUTE_CARD, enabled);
             }
         });
-        root.addView(mediaBridgeRouteCardCheck, matchWrap());
+        addSettingsCheckBox(root, mediaBridgeRouteCardCheck);
 
-        Button mediaBridgeStartButton = createControlButton("Запустить Media Bridge",
+        mediaBridgeNavigationControlsCheck = new Switch(this);
+        mediaBridgeNavigationControlsCheck.setText(
+                "Углы «Назад» и «Домой» поверх Навигатора (вместо JCarTools)");
+        mediaBridgeNavigationControlsCheck.setTextSize(18f);
+        mediaBridgeNavigationControlsCheck.setTextColor(Color.rgb(52, 52, 50));
+        mediaBridgeNavigationControlsCheck.setChecked(preferences.getBoolean(
+                PREF_MEDIA_BRIDGE_NAV_CONTROLS, false));
+        mediaBridgeNavigationControlsCheck.setEnabled(isMediaBridgeInstalled());
+        mediaBridgeNavigationControlsCheck.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                boolean enabled = mediaBridgeNavigationControlsCheck.isChecked();
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(PREF_MEDIA_BRIDGE_NAV_CONTROLS, enabled).apply();
+                sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_NAV_CONTROLS, enabled);
+            }
+        });
+        addSettingsCheckBox(root, mediaBridgeNavigationControlsCheck);
+
+        TextView mediaBridgeServiceNote = new TextView(this);
+        mediaBridgeServiceNote.setText(
+                "Служебное восстановление (обычно не требуется после установки)");
+        mediaBridgeServiceNote.setTextSize(18f);
+        mediaBridgeServiceNote.setTextColor(Color.rgb(104, 103, 98));
+        mediaBridgeServiceNote.setPadding(0, dp(14), 0, dp(4));
+        root.addView(mediaBridgeServiceNote, matchWrap());
+
+        Button mediaBridgeStartButton = createControlButton(
+                "Перезапустить фоновый Media Bridge",
                 Color.rgb(116, 107, 95), Color.WHITE);
         mediaBridgeStartButton.setEnabled(isMediaBridgeInstalled());
         mediaBridgeStartButton.setOnClickListener(new View.OnClickListener() {
@@ -753,7 +846,7 @@ public final class MainActivity extends Activity {
         root.addView(mediaBridgeStartButton, controlButtonParams());
 
         Button notificationAccessButton = createControlButton(
-                "Доступ Media Bridge к уведомлениям",
+                "Доступ к уведомлениям (управление музыкой)",
                 Color.rgb(116, 107, 95), Color.WHITE);
         notificationAccessButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
@@ -763,7 +856,7 @@ public final class MainActivity extends Activity {
         root.addView(notificationAccessButton, controlButtonParams());
 
         Button accessibilityButton = createControlButton(
-                "Спецвозможности для карты на главном экране",
+                "Спецвозможности (маршрут и кнопки Навигатора)",
                 Color.rgb(116, 107, 95), Color.WHITE);
         accessibilityButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
@@ -777,37 +870,51 @@ public final class MainActivity extends Activity {
                     mediaBridgeAutoPlayCheck.isChecked());
             sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_ROUTE_CARD,
                     mediaBridgeRouteCardCheck.isChecked());
+            sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_NAV_CONTROLS,
+                    mediaBridgeNavigationControlsCheck.isChecked());
         }
 
         TextView idleModeLabel = new TextView(this);
-        idleModeLabel.setText("Заставка на приборной панели");
-        idleModeLabel.setTextSize(17f);
+        idleModeLabel.setText("Режим малого виджета приборной панели");
+        idleModeLabel.setTextSize(21f);
         idleModeLabel.setTextColor(Color.rgb(52, 52, 50));
         idleModeLabel.setPadding(0, dp(12), 0, dp(4));
         root.addView(idleModeLabel, matchWrap());
 
         idleModeSpinner = new Spinner(this);
-        ArrayAdapter<String> idleModeAdapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, IDLE_MODE_NAMES);
-        idleModeAdapter.setDropDownViewResource(
-                android.R.layout.simple_spinner_dropdown_item);
+        ArrayAdapter<String> idleModeAdapter = createSettingsSpinnerAdapter(IDLE_MODE_NAMES);
         idleModeSpinner.setAdapter(idleModeAdapter);
-        idleModeSpinner.setSelection(Math.max(0, Math.min(
-                IDLE_MODE_NAMES.length - 1,
-                preferences.getInt(PREF_IDLE_MODE, IDLE_MODE_AUTO))));
+        idleModeSpinner.setSelection(idleModeSelectionForValue(
+                preferences.getInt(PREF_IDLE_MODE, IDLE_MODE_AWD)));
         idleModeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
                                                   int position, long id) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .putInt(PREF_IDLE_MODE, position).apply();
+                        .putInt(PREF_IDLE_MODE, IDLE_MODE_VALUES[Math.max(0,
+                                Math.min(IDLE_MODE_VALUES.length - 1, position))]).apply();
                 updateOverlayIdleMode();
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
-        root.addView(idleModeSpinner, matchWrap());
+        styleSettingsSpinner(idleModeSpinner);
+        root.addView(idleModeSpinner, settingsControlParams());
 
-        instrumentTbtCheck = new CheckBox(this);
-        instrumentTbtCheck.setText("Показывать манёвр вне полноэкранной карты");
+        navigationHudCheck = new Switch(this);
+        navigationHudCheck.setText("Манёвры навигатора на HUD");
+        navigationHudCheck.setTextSize(18f);
+        navigationHudCheck.setTextColor(Color.rgb(52, 52, 50));
+        navigationHudCheck.setChecked(preferences.getBoolean(PREF_NAVIGATION_HUD, true));
+        navigationHudCheck.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(PREF_NAVIGATION_HUD, navigationHudCheck.isChecked()).apply();
+                syncFakeTeleNavNavigationOutputs();
+            }
+        });
+        addSettingsCheckBox(root, navigationHudCheck);
+
+        instrumentTbtCheck = new Switch(this);
+        instrumentTbtCheck.setText("Манёвры на приборной панели");
         instrumentTbtCheck.setTextSize(18f);
         instrumentTbtCheck.setTextColor(Color.rgb(52, 52, 50));
         instrumentTbtCheck.setChecked(preferences.getBoolean(PREF_INSTRUMENT_TBT, true));
@@ -815,23 +922,21 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                         .putBoolean(PREF_INSTRUMENT_TBT, instrumentTbtCheck.isChecked()).apply();
-                syncFakeTeleNavInstrumentTbt();
+                syncFakeTeleNavNavigationOutputs();
             }
         });
-        root.addView(instrumentTbtCheck, matchWrap());
+        addSettingsCheckBox(root, instrumentTbtCheck);
 
         TextView clusterManeuverPositionLabel = new TextView(this);
         clusterManeuverPositionLabel.setText("Карточка манёвра в полноэкранной карте");
-        clusterManeuverPositionLabel.setTextSize(17f);
+        clusterManeuverPositionLabel.setTextSize(21f);
         clusterManeuverPositionLabel.setTextColor(Color.rgb(52, 52, 50));
         clusterManeuverPositionLabel.setPadding(0, dp(10), 0, dp(4));
         root.addView(clusterManeuverPositionLabel, matchWrap());
 
         clusterManeuverPositionSpinner = new Spinner(this);
-        ArrayAdapter<String> clusterPositionAdapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, CLUSTER_MANEUVER_POSITION_NAMES);
-        clusterPositionAdapter.setDropDownViewResource(
-                android.R.layout.simple_spinner_dropdown_item);
+        ArrayAdapter<String> clusterPositionAdapter =
+                createSettingsSpinnerAdapter(CLUSTER_MANEUVER_POSITION_NAMES);
         clusterManeuverPositionSpinner.setAdapter(clusterPositionAdapter);
         clusterManeuverPositionSpinner.setSelection(getClusterManeuverPosition());
         clusterManeuverPositionSpinner.setOnItemSelectedListener(
@@ -844,16 +949,17 @@ public final class MainActivity extends Activity {
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
-        root.addView(clusterManeuverPositionSpinner, matchWrap());
+        styleSettingsSpinner(clusterManeuverPositionSpinner);
+        root.addView(clusterManeuverPositionSpinner, settingsControlParams());
 
         TextView cameraTitle = new TextView(this);
         cameraTitle.setText("Предупреждения о камерах");
         cameraTitle.setTextColor(Color.rgb(31, 32, 31));
-        cameraTitle.setTextSize(22f);
+        cameraTitle.setTextSize(26f);
         cameraTitle.setPadding(0, dp(18), 0, dp(8));
         root.addView(cameraTitle, matchWrap());
 
-        cameraAudioCheck = new CheckBox(this);
+        cameraAudioCheck = new Switch(this);
         cameraAudioCheck.setText("Звуковое предупреждение");
         cameraAudioCheck.setTextSize(18f);
         cameraAudioCheck.setTextColor(Color.rgb(52, 52, 50));
@@ -862,11 +968,12 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                         .putBoolean(PREF_CAMERA_AUDIO, cameraAudioCheck.isChecked()).apply();
+                if (!cameraAudioCheck.isChecked()) releaseAlertSound();
             }
         });
-        root.addView(cameraAudioCheck, matchWrap());
+        addSettingsCheckBox(root, cameraAudioCheck);
 
-        cameraHudCheck = new CheckBox(this);
+        cameraHudCheck = new Switch(this);
         final boolean hudAvailable = isHudOutputAvailable();
         if (!hudAvailable) {
             preferences.edit().putBoolean(PREF_CAMERA_HUD, false).apply();
@@ -891,9 +998,9 @@ public final class MainActivity extends Activity {
                 }
             }
         });
-        root.addView(cameraHudCheck, matchWrap());
+        addSettingsCheckBox(root, cameraHudCheck);
 
-        cameraGpsGuardCheck = new CheckBox(this);
+        cameraGpsGuardCheck = new Switch(this);
         cameraGpsGuardCheck.setText("Защита GPS от скачков (пробный режим)");
         cameraGpsGuardCheck.setTextSize(18f);
         cameraGpsGuardCheck.setTextColor(Color.rgb(52, 52, 50));
@@ -911,20 +1018,18 @@ public final class MainActivity extends Activity {
                         : "GPS Guard выключен: используется исходный поток GPS");
             }
         });
-        root.addView(cameraGpsGuardCheck, matchWrap());
+        addSettingsCheckBox(root, cameraGpsGuardCheck);
 
         TextView warningModeLabel = new TextView(this);
         warningModeLabel.setText("Когда предупреждать о скоростных камерах");
-        warningModeLabel.setTextSize(17f);
+        warningModeLabel.setTextSize(21f);
         warningModeLabel.setTextColor(Color.rgb(52, 52, 50));
         warningModeLabel.setPadding(0, dp(10), 0, dp(4));
         root.addView(warningModeLabel, matchWrap());
 
         cameraWarningModeSpinner = new Spinner(this);
-        ArrayAdapter<String> warningModeAdapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, CAMERA_WARNING_MODE_NAMES);
-        warningModeAdapter.setDropDownViewResource(
-                android.R.layout.simple_spinner_dropdown_item);
+        ArrayAdapter<String> warningModeAdapter =
+                createSettingsSpinnerAdapter(CAMERA_WARNING_MODE_NAMES);
         cameraWarningModeSpinner.setAdapter(warningModeAdapter);
         cameraWarningModeSpinner.setSelection(Math.max(0, Math.min(
                 CAMERA_WARNING_MODE_NAMES.length - 1,
@@ -938,19 +1043,18 @@ public final class MainActivity extends Activity {
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
-        root.addView(cameraWarningModeSpinner, matchWrap());
+        styleSettingsSpinner(cameraWarningModeSpinner);
+        root.addView(cameraWarningModeSpinner, settingsControlParams());
 
         TextView cameraSoundLabel = new TextView(this);
         cameraSoundLabel.setText("Звук предупреждения");
-        cameraSoundLabel.setTextSize(17f);
+        cameraSoundLabel.setTextSize(21f);
         cameraSoundLabel.setTextColor(Color.rgb(52, 52, 50));
         cameraSoundLabel.setPadding(0, dp(10), 0, dp(4));
         root.addView(cameraSoundLabel, matchWrap());
 
         cameraSoundSpinner = new Spinner(this);
-        ArrayAdapter<String> soundAdapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, CAMERA_SOUND_NAMES);
-        soundAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        ArrayAdapter<String> soundAdapter = createSettingsSpinnerAdapter(CAMERA_SOUND_NAMES);
         cameraSoundSpinner.setAdapter(soundAdapter);
         cameraSoundSpinner.setSelection(Math.max(0, Math.min(
                 CAMERA_SOUND_NAMES.length - 1,
@@ -963,7 +1067,8 @@ public final class MainActivity extends Activity {
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
-        root.addView(cameraSoundSpinner, matchWrap());
+        styleSettingsSpinner(cameraSoundSpinner);
+        root.addView(cameraSoundSpinner, settingsControlParams());
 
         cameraDistanceView = new TextView(this);
         cameraDistanceView.setTextSize(18f);
@@ -1006,13 +1111,92 @@ public final class MainActivity extends Activity {
     private Button createControlButton(String text, int background, int foreground) {
         Button button = new Button(this);
         button.setText(text);
-        button.setTextSize(19f);
+        button.setTextSize(22f);
         button.setTextColor(foreground);
         button.setAllCaps(false);
         button.setGravity(Gravity.CENTER);
         button.setBackgroundTintList(ColorStateList.valueOf(background));
-        button.setMinHeight(dp(64));
+        button.setMinHeight(dp(76));
         return button;
+    }
+
+    private void addSettingsCheckBox(LinearLayout root, Switch checkBox) {
+        checkBox.setTextSize(21f);
+        checkBox.setTextColor(Color.rgb(52, 52, 50));
+        checkBox.setMinHeight(dp(68));
+        checkBox.setGravity(Gravity.CENTER_VERTICAL);
+        checkBox.setPadding(dp(10), dp(8), dp(18), dp(8));
+        checkBox.setShowText(false);
+        checkBox.setSwitchMinWidth(dp(64));
+        checkBox.setThumbTintList(new ColorStateList(
+                new int[][]{
+                        new int[]{android.R.attr.state_checked},
+                        new int[]{-android.R.attr.state_enabled},
+                        new int[]{}
+                },
+                new int[]{Color.WHITE, Color.rgb(210, 207, 201), Color.WHITE}));
+        checkBox.setTrackTintList(new ColorStateList(
+                new int[][]{
+                        new int[]{android.R.attr.state_checked},
+                        new int[]{-android.R.attr.state_enabled},
+                        new int[]{}
+                },
+                new int[]{
+                        Color.rgb(205, 137, 70),
+                        Color.rgb(174, 171, 164),
+                        Color.rgb(91, 89, 84)
+                }));
+
+        // The row spans the safe settings column, but only the switch and its
+        // caption are clickable. Swiping the empty part can therefore scroll
+        // without toggling an option by accident.
+        FrameLayout row = new FrameLayout(this);
+        row.setClickable(false);
+        FrameLayout.LayoutParams optionParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.START | Gravity.CENTER_VERTICAL);
+        row.addView(checkBox, optionParams);
+        LinearLayout.LayoutParams rowParams = settingsControlParams();
+        rowParams.height = LinearLayout.LayoutParams.WRAP_CONTENT;
+        root.addView(row, rowParams);
+    }
+
+    private ArrayAdapter<String> createSettingsSpinnerAdapter(String[] values) {
+        return new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, values) {
+            @Override public View getView(int position, View convertView, ViewGroup parent) {
+                TextView view = (TextView) super.getView(position, convertView, parent);
+                styleSpinnerText(view, false);
+                return view;
+            }
+
+            @Override public View getDropDownView(int position, View convertView, ViewGroup parent) {
+                TextView view = (TextView) super.getDropDownView(position, convertView, parent);
+                styleSpinnerText(view, true);
+                return view;
+            }
+        };
+    }
+
+    private void styleSpinnerText(TextView view, boolean dropDown) {
+        view.setTextSize(21f);
+        view.setTextColor(Color.rgb(42, 42, 40));
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        view.setMinHeight(dp(dropDown ? 72 : 68));
+        view.setPadding(dp(18), dp(12), dp(18), dp(12));
+    }
+
+    private void styleSettingsSpinner(Spinner spinner) {
+        spinner.setMinimumHeight(dp(72));
+        spinner.setPadding(dp(4), dp(2), dp(4), dp(2));
+        spinner.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(116, 107, 95)));
+    }
+
+    private int idleModeSelectionForValue(int storedValue) {
+        for (int index = 0; index < IDLE_MODE_VALUES.length; index++) {
+            if (IDLE_MODE_VALUES[index] == storedValue) return index;
+        }
+        return 0;
     }
 
     private boolean isMediaBridgeInstalled() {
@@ -1036,6 +1220,9 @@ public final class MainActivity extends Activity {
         if (enabledValue != null) {
             if (MEDIA_BRIDGE_ACTION_SET_ROUTE_CARD.equals(action)) {
                 intent.putExtra(MEDIA_BRIDGE_EXTRA_ROUTE_CARD,
+                        enabledValue.booleanValue());
+            } else if (MEDIA_BRIDGE_ACTION_SET_NAV_CONTROLS.equals(action)) {
+                intent.putExtra(MEDIA_BRIDGE_EXTRA_NAV_CONTROLS,
                         enabledValue.booleanValue());
             } else {
                 intent.putExtra(MEDIA_BRIDGE_EXTRA_AUTO_PLAY,
@@ -1097,9 +1284,22 @@ public final class MainActivity extends Activity {
 
     private LinearLayout.LayoutParams controlButtonParams() {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(72));
+                settingsControlWidth(), dp(82));
         params.setMargins(0, 0, 0, dp(14));
         return params;
+    }
+
+    private LinearLayout.LayoutParams settingsControlParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                settingsControlWidth(), LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, 0, 0, dp(12));
+        return params;
+    }
+
+    private int settingsControlWidth() {
+        int available = Math.max(dp(320),
+                getResources().getDisplayMetrics().widthPixels - dp(96));
+        return Math.min(available, dp(1100));
     }
 
     @Override
@@ -1156,6 +1356,7 @@ public final class MainActivity extends Activity {
     }
 
     private void disableAwdDisplay() {
+        boolean wasFullScreen = instrumentMapFullScreenActive;
         instrumentMapFullScreenActive = false;
         getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit().putBoolean(PREF_ENABLED, false).apply();
@@ -1170,6 +1371,8 @@ public final class MainActivity extends Activity {
         clearActiveCamera();
         releaseSteeringInputShortcut();
         requestNavigationMode(false);
+        if (wasFullScreen) sendNeusoftNavigationState(false);
+        syncFakeTeleNavNavigationOutputs();
         updateControlUi(false, "Выключено");
     }
 
@@ -1286,113 +1489,27 @@ public final class MainActivity extends Activity {
         }
     }
 
-    /** Converts NaviKit resource names to the M821 maneuver codes used by IPKService. */
-    private static int yandexManeuverIcon(String resourceId) {
-        String id = resourceId == null ? "" : resourceId.toLowerCase(Locale.US)
-                .replace('-', '_');
-        if (id.contains("destination") || id.contains("finish")) return 22;
-        if (id.contains("tunnel")) return 28;
-        if (id.contains("roundabout") || id.contains("traffic_circle")
-                || id.contains("circular")) {
-            return id.contains("leave") || id.contains("exit") ? 25 : 24;
-        }
-        if (id.contains("uturn") || id.contains("u_turn") || id.contains("u-turn")) {
-            return id.contains("right") ? 9 : 8;
-        }
-        boolean left = id.contains("left");
-        boolean right = id.contains("right");
-        if (id.contains("hard") || id.contains("sharp") || id.contains("back")) {
-            if (left) return 6;
-            if (right) return 7;
-        }
-        if (id.contains("slight") || id.contains("ahead") || id.contains("fork")
-                || id.contains("bear") || id.contains("merge")) {
-            if (left) return 2;
-            if (right) return 3;
-        }
-        if (left) return 4;
-        if (right) return 5;
-        return 1;
-    }
-
-    /** Maps NaviKit resource names to the TeleNav maneuver IDs consumed by ExtraService. */
-    private static int yandexTeleNavManeuver(String resourceId) {
-        String id = resourceId == null ? "" : resourceId.toLowerCase(Locale.US)
-                .replace('-', '_');
-        boolean left = id.contains("left");
-        boolean right = id.contains("right");
-        if (id.contains("destination") || id.contains("finish")) {
-            return left ? 2 : right ? 4 : 0;
-        }
-        if (id.contains("roundabout") || id.contains("traffic_circle")
-                || id.contains("circular")) {
-            return left ? 27 : 28;
-        }
-        if (id.contains("uturn") || id.contains("u_turn") || id.contains("u-turn")) {
-            return right ? 22 : 21;
-        }
-        if (id.contains("exit")) return left ? 11 : right ? 13 : 14;
-        if (id.contains("merge")) return left ? 7 : right ? 9 : 14;
-        if (id.contains("hard") || id.contains("sharp") || id.contains("back")) {
-            return left ? 15 : right ? 16 : 14;
-        }
-        if (id.contains("slight") || id.contains("ahead") || id.contains("fork")
-                || id.contains("bear")) {
-            return left ? 19 : right ? 20 : 14;
-        }
-        if (left) return 17;
-        if (right) return 18;
-        return 14;
-    }
-
-    private boolean sendYandexManeuverToHud(boolean clear) {
-        try {
-            Intent hud = new Intent(TELENAV_ACTION).setComponent(TELENAV_RECEIVER);
-            if (clear) {
-                hud.putExtra("mode", "STOP");
-            } else {
-                boolean panelTbt = shouldEnableFakeTeleNavInstrumentTbt();
-                hud.putExtra("mode", panelTbt ? "PANEL_LEGACY" : "LEGACY");
-                hud.putExtra("street", yandexNextRoadName);
-                hud.putExtra("turn", yandexTeleNavManeuver(yandexManeuverResourceId));
-                hud.putExtra("panelTurn", yandexManeuverIcon(yandexManeuverResourceId));
-                hud.putExtra("distance", yandexManeuverDistanceMeters);
-                hud.putExtra("destDistance", Math.max(
-                        yandexManeuverDistanceMeters, yandexRouteDistanceMeters));
-                hud.putExtra("intervalMs", 1000L);
-            }
-            sendBroadcast(hud);
-            Log.i(TAG, clear ? "Yandex HUD maneuver cleared through FakeTeleNav"
-                    : "Yandex HUD maneuver through FakeTeleNav: id="
-                    + yandexManeuverResourceId
-                    + " telenav=" + yandexTeleNavManeuver(yandexManeuverResourceId)
-                    + " road=" + yandexNextRoadName
-                    + " distance=" + yandexManeuverDistanceMeters
-                    + " routeLeft=" + yandexRouteDistanceMeters);
-            return true;
-        } catch (Throwable error) {
-            Log.w(TAG, "Yandex HUD FakeTeleNav update failed", error);
-            return false;
-        }
-    }
-
     private boolean shouldEnableFakeTeleNavInstrumentTbt() {
         return getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getBoolean(PREF_INSTRUMENT_TBT, true)
                 && !instrumentMapFullScreenActive;
     }
 
-    private void syncFakeTeleNavInstrumentTbt() {
+    private void syncFakeTeleNavNavigationOutputs() {
         try {
-            boolean enabled = shouldEnableFakeTeleNavInstrumentTbt();
+            boolean hudEnabled = getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getBoolean(PREF_NAVIGATION_HUD, true);
+            boolean instrumentEnabled = shouldEnableFakeTeleNavInstrumentTbt();
             Intent control = new Intent(TELENAV_ACTION).setComponent(TELENAV_RECEIVER);
-            control.putExtra(TELENAV_EXTRA_PANEL_TBT_ENABLED, enabled);
+            control.putExtra(TELENAV_EXTRA_HUD_ENABLED, hudEnabled);
+            control.putExtra(TELENAV_EXTRA_PANEL_TBT_ENABLED, instrumentEnabled);
             sendBroadcast(control);
-            Log.i(TAG, "FakeTeleNav instrument TBT enabled=" + enabled
+            Log.i(TAG, "FakeTeleNav outputs hud=" + hudEnabled
+                    + " instrument=" + instrumentEnabled
                     + " fullScreen=" + instrumentMapFullScreenActive
-                    + " miniMap=" + shouldShowMapIdle());
+                    + " routeWidget=" + shouldShowRouteIdle());
         } catch (Throwable error) {
-            Log.w(TAG, "FakeTeleNav instrument TBT sync failed", error);
+            Log.w(TAG, "FakeTeleNav output sync failed", error);
         }
     }
 
@@ -1483,19 +1600,20 @@ public final class MainActivity extends Activity {
 
     private void handleInstrumentNavigationRequest(int requestedMode) {
         append("IPK onChangeNavi(" + requestedMode + ")");
-        if (!isAwdEnabled() || !shouldShowMapIdle()) {
-            append("Steering map launch ignored: instrument mode is not Map");
+        if (!isAwdEnabled() || !shouldShowRouteIdle()) {
+            append("Steering map launch ignored: instrument mode is not Route");
             return;
         }
         if (requestedMode == IPK_REQUEST_FULL_SCREEN) {
             launchYandexMapsOnInstrumentDisplay();
         } else if (requestedMode == IPK_REQUEST_MINI) {
             instrumentMapFullScreenActive = false;
-            syncFakeTeleNavInstrumentTbt();
+            syncFakeTeleNavNavigationOutputs();
             dismissClusterGuidanceOverlay();
             sendNeusoftNavigationState(false);
             sendNavigationStatus(IPK_WIDGET_MAP_MODE, 3);
             if (overlayRoot == null) showFullInstrumentOverlay();
+            refreshLauncherRouteCard();
             append("Instrument map returned to MINI mode");
         }
     }
@@ -1516,7 +1634,7 @@ public final class MainActivity extends Activity {
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         try {
             instrumentMapFullScreenActive = true;
-            syncFakeTeleNavInstrumentTbt();
+            syncFakeTeleNavNavigationOutputs();
             hideInstrumentOverlayForFullScreen();
             sendNavigationStatus(2, 2);
             ActivityOptions options = ActivityOptions.makeBasic()
@@ -1537,7 +1655,7 @@ public final class MainActivity extends Activity {
             }, 500L);
         } catch (Throwable error) {
             instrumentMapFullScreenActive = false;
-            syncFakeTeleNavInstrumentTbt();
+            syncFakeTeleNavNavigationOutputs();
             dismissClusterGuidanceOverlay();
             appendFailure("Yandex Navi cluster launch failed", error);
             sendNeusoftNavigationState(false);
@@ -1573,13 +1691,13 @@ public final class MainActivity extends Activity {
     }
 
     private boolean isSteeringMapShortcutEnabled() {
-        return ENABLE_STEERING_MEDIA_SHORTCUT && isAwdEnabled() && shouldShowMapIdle();
+        return ENABLE_STEERING_MEDIA_SHORTCUT && isAwdEnabled() && shouldShowRouteIdle();
     }
 
     private void toggleInstrumentMapFromModeKey() {
         if (instrumentMapFullScreenActive) {
             returnInstrumentMapToMini("Instrument mode key long press");
-        } else if (isAwdEnabled() && shouldShowMapIdle()) {
+        } else if (isAwdEnabled() && shouldShowRouteIdle()) {
             append("Instrument mode key long press: launching Yandex Maps");
             launchYandexMapsOnInstrumentDisplay();
         } else {
@@ -1597,7 +1715,7 @@ public final class MainActivity extends Activity {
 
     private void returnInstrumentMapToMini(String source) {
         instrumentMapFullScreenActive = false;
-        syncFakeTeleNavInstrumentTbt();
+        syncFakeTeleNavNavigationOutputs();
         dismissClusterGuidanceOverlay();
         append(source + ": returning instrument panel to MINI mode");
         // Reproduce the verified off/on protocol sequence without destroying the
@@ -1609,15 +1727,25 @@ public final class MainActivity extends Activity {
             @Override public void run() {
                 sendNavigationStatus(IPK_WIDGET_MAP_MODE, 3);
                 restoreInstrumentOverlayVisibility();
+                refreshLauncherRouteCard();
                 append("Instrument MINI overlay restored without MapKit restart");
             }
         }, 500L);
+    }
+
+    private void refreshLauncherRouteCard() {
+        boolean enabled = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(PREF_MEDIA_BRIDGE_ROUTE_CARD, true);
+        sendMediaBridgeControl(MEDIA_BRIDGE_ACTION_SET_ROUTE_CARD, enabled);
     }
 
     private void hideInstrumentOverlayForFullScreen() {
         if (overlayRoot != null) {
             overlayRoot.setVisibility(View.INVISIBLE);
             append("Instrument MINI overlay hidden; MapKit kept alive");
+        }
+        if (overlayRouteGuidanceView != null) {
+            overlayRouteGuidanceView.setVisibility(View.INVISIBLE);
         }
     }
 
@@ -1631,6 +1759,10 @@ public final class MainActivity extends Activity {
         overlayRoot.setVisibility(View.VISIBLE);
         overlayRoot.invalidate();
         if (overlayMapView != null) overlayMapView.invalidate();
+        if (overlayRouteGuidanceView != null) {
+            overlayRouteGuidanceView.setVisibility(View.VISIBLE);
+            overlayRouteGuidanceView.invalidate();
+        }
     }
 
     private void showClusterGuidanceOverlay() {
@@ -1682,6 +1814,49 @@ public final class MainActivity extends Activity {
         }
         clusterGuidanceView = null;
         clusterGuidanceWindowManager = null;
+    }
+
+    private void updateNavigationGuidanceViews() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            overlayHandler.post(new Runnable() {
+                @Override public void run() { updateNavigationGuidanceViews(); }
+            });
+            return;
+        }
+        if (overlayRouteGuidanceView != null) {
+            overlayRouteGuidanceView.update(yandexManeuverResourceId, yandexNextRoadName,
+                    yandexManeuverDistanceMeters, yandexRouteDistanceMeters,
+                    yandexRouteTimeSeconds, yandexManeuverVisible,
+                    !yandexRoutePoints.isEmpty());
+        }
+        updateClusterGuidanceOverlay();
+    }
+
+    private boolean hasYandexNavigationState() {
+        return !yandexRoutePoints.isEmpty()
+                || !yandexManeuverResourceId.isEmpty()
+                || !yandexNextRoadName.isEmpty()
+                || yandexManeuverDistanceMeters > 0
+                || yandexRouteDistanceMeters > 0
+                || yandexRouteTimeSeconds > 0
+                || yandexManeuverVisible;
+    }
+
+    private void clearYandexNavigationState(String reason) {
+        yandexNextRoadName = "";
+        yandexManeuverResourceId = "";
+        yandexManeuverDistanceMeters = 0;
+        yandexRouteDistanceMeters = 0;
+        yandexRouteTimeSeconds = 0;
+        yandexManeuverVisible = false;
+        yandexRoutePoints = "";
+        yandexNavigationLatitude = Double.NaN;
+        yandexNavigationLongitude = Double.NaN;
+        yandexNavigationHeading = Float.NaN;
+        lastYandexNavigationUpdateElapsedMs = 0L;
+        if (overlayMapView != null) overlayMapView.clearNavigatorRoute();
+        updateNavigationGuidanceViews();
+        Log.i(TAG, reason);
     }
 
     private void updateClusterGuidanceOverlay() {
@@ -2132,6 +2307,7 @@ public final class MainActivity extends Activity {
             startService(serviceIntent);
         }
         overlayHandler.removeCallbacks(cameraLocationWatchdog);
+        overlayHandler.removeCallbacks(navigatorRouteFreshnessWatchdog);
         overlayHandler.postDelayed(cameraLocationWatchdog, CAMERA_LOCATION_WATCHDOG_MS);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         if (locationManager == null) {
@@ -2362,6 +2538,9 @@ public final class MainActivity extends Activity {
     }
 
     private void showCameraAlert(SpeedCamera camera, float distanceMeters) {
+        if (overlayRouteGuidanceView != null) {
+            overlayRouteGuidanceView.updateCameraAlert(camera, distanceMeters);
+        }
         if (overlayView != null) {
             overlayView.updateCameraAlert(camera, distanceMeters);
         }
@@ -2378,6 +2557,9 @@ public final class MainActivity extends Activity {
         activeCameraDistanceBucket = -1;
         if (overlayView != null) overlayView.clearCameraAlert();
         if (overlayMapView != null) overlayMapView.clearCamera();
+        if (overlayRouteGuidanceView != null) {
+            overlayRouteGuidanceView.clearCameraAlert();
+        }
     }
 
     private void sendCameraHudAlert(SpeedCamera camera, int distanceMeters) {
@@ -2426,7 +2608,6 @@ public final class MainActivity extends Activity {
         Log.i(TAG, "HUD camera alert cleared");
         // FakeTeleNav owns the persistent Navigator state and restores the latest
         // maneuver after processing this camera-specific STOP command.
-        if (yandexManeuverVisible) scheduleHudNavigationTextRewrite();
     }
 
     private boolean isHudOutputAvailable() {
@@ -2785,6 +2966,7 @@ public final class MainActivity extends Activity {
             }
             presentation.update(frontPerWheel, rearPerWheel, signalSummary());
             presentation.setRadarIdle(shouldShowRadarIdle());
+            presentation.setBlankIdle(shouldShowBlankIdle());
             append("Presentation показан на displayId=" + display.getDisplayId()
                     + " (AMAP ожидает ID 2; разрешён fallback) обычным типом окна");
         } catch (Throwable error) {
@@ -2830,6 +3012,7 @@ public final class MainActivity extends Activity {
             overlayView = new AwdView(displayContext);
             overlayView.update(displayFrontPerWheel(), displayRearPerWheel(), signalSummary());
             overlayView.setRadarIdle(shouldShowRadarIdle());
+            overlayView.setBlankIdle(shouldShowBlankIdle());
             if (activeCamera != null && (demoAlertActive || lastLocation != null)) {
                 float distance = demoAlertActive
                         ? activeMinimumDistance
@@ -2857,7 +3040,7 @@ public final class MainActivity extends Activity {
                 overlayRoot = overlayContentRoot;
             }
 
-            int requestedWindowType = shouldShowMapIdle()
+            int requestedWindowType = shouldShowRouteIdle()
                     ? WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY
                     : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
@@ -2888,6 +3071,7 @@ public final class MainActivity extends Activity {
                 overlayWindowManager.addView(overlayRoot, params);
                 append("Instrument map: SYSTEM_OVERLAY denied, APPLICATION_OVERLAY fallback used");
             }
+            attachMiniRouteGuidanceOverlayIfNeeded();
             overlayHandler.removeCallbacks(overlayTimeout);
             if (!liveFullOverlay) {
                 overlayHandler.postDelayed(overlayTimeout, fullScreen ? 8000L : 15000L);
@@ -2907,6 +3091,7 @@ public final class MainActivity extends Activity {
 
     private void dismissInstrumentOverlay() {
         overlayHandler.removeCallbacks(overlayTimeout);
+        dismissMiniRouteGuidanceOverlay();
         if (overlayMapView != null && overlayContentRoot != null) {
             try { overlayContentRoot.removeView(overlayMapView); }
             catch (Throwable error) { Log.w(TAG, "Map surface removal failed", error); }
@@ -3000,7 +3185,6 @@ public final class MainActivity extends Activity {
                     appendFailure("Подписка отклонена для " + propertyId, error);
                 }
             }
-            if (yandexManeuverVisible) scheduleHudNavigationTextRewrite();
         } catch (Throwable error) {
             appendFailure("Не удалось открыть vendor_extension", error);
         }
@@ -3049,10 +3233,12 @@ public final class MainActivity extends Activity {
                 if (presentation != null) {
                     presentation.update(frontPerWheel, rearPerWheel, signalSummary());
                     presentation.setRadarIdle(shouldShowRadarIdle());
+                    presentation.setBlankIdle(shouldShowBlankIdle());
                 }
                 if (overlayView != null) {
                     overlayView.update(displayFrontPerWheel(), displayRearPerWheel(), signalSummary());
                     overlayView.setRadarIdle(shouldShowRadarIdle());
+                    overlayView.setBlankIdle(shouldShowBlankIdle());
                 }
             }
         });
@@ -3135,29 +3321,38 @@ public final class MainActivity extends Activity {
 
     private boolean shouldShowRadarIdle() {
         int mode = getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getInt(PREF_IDLE_MODE, IDLE_MODE_AUTO);
+                .getInt(PREF_IDLE_MODE, IDLE_MODE_AWD);
         if (mode == IDLE_MODE_RADAR) return true;
-        if (mode == IDLE_MODE_AWD || mode == IDLE_MODE_MAP) return false;
-        return !hasAwdSignalData();
+        return false;
     }
 
-    private boolean shouldShowMapIdle() {
+    private boolean shouldShowBlankIdle() {
         return getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getInt(PREF_IDLE_MODE, IDLE_MODE_AUTO) == IDLE_MODE_MAP;
+                .getInt(PREF_IDLE_MODE, IDLE_MODE_AWD) == IDLE_MODE_BLANK;
+    }
+
+    private boolean shouldShowRouteIdle() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getInt(PREF_IDLE_MODE, IDLE_MODE_AWD) == IDLE_MODE_ROUTE;
     }
 
     private void updateOverlayIdleMode() {
+        if (instrumentMapFullScreenActive && !shouldShowRouteIdle()) {
+            returnInstrumentMapToMini("Instrument widget mode changed");
+        }
         boolean radarIdle = shouldShowRadarIdle();
         if (overlayView != null) overlayView.setRadarIdle(radarIdle);
+        if (overlayView != null) overlayView.setBlankIdle(shouldShowBlankIdle());
         if (presentation != null) presentation.setRadarIdle(radarIdle);
+        if (presentation != null) presentation.setBlankIdle(shouldShowBlankIdle());
         updateInstrumentMapMode();
-        syncFakeTeleNavInstrumentTbt();
+        syncFakeTeleNavNavigationOutputs();
         updateSteeringInputShortcut();
     }
 
     private void updateInstrumentMapMode() {
         if (overlayContentRoot == null || overlayView == null) return;
-        boolean mapRequested = shouldShowMapIdle();
+        boolean mapRequested = shouldShowRouteIdle();
         boolean mapEnabled = mapRequested && RoadAssistantApplication.hasMapKitApiKey();
         overlayView.setMapIdle(mapEnabled);
         if (mapEnabled && overlayMapView == null) {
@@ -3169,14 +3364,103 @@ public final class MainActivity extends Activity {
             mapParams.topMargin = 0;
             overlayContentRoot.addView(overlayMapView, 0, mapParams);
             if (activeCamera != null) overlayMapView.showCamera(activeCamera);
-            append("Instrument mode: Yandex map 637x500 opaque top surface");
+            if (!yandexRoutePoints.isEmpty()) {
+                overlayMapView.updateNavigatorRoute(yandexRoutePoints);
+            }
+            if (!Double.isNaN(yandexNavigationLatitude)
+                    && !Double.isNaN(yandexNavigationLongitude)) {
+                overlayMapView.updateNavigatorPosition(yandexNavigationLatitude,
+                        yandexNavigationLongitude, yandexNavigationHeading);
+            }
+            overlayRouteGuidanceView = new MiniRouteGuidanceView(
+                    overlayContentRoot.getContext());
+            overlayRouteGuidanceView.update(yandexManeuverResourceId, yandexNextRoadName,
+                    yandexManeuverDistanceMeters, yandexRouteDistanceMeters,
+                    yandexRouteTimeSeconds, yandexManeuverVisible,
+                    !yandexRoutePoints.isEmpty());
+            attachMiniRouteGuidanceOverlayIfNeeded();
+            append("Instrument mode: active route map 637x500 with guidance chrome");
         } else if (!mapEnabled && overlayMapView != null) {
+            dismissMiniRouteGuidanceOverlay();
             overlayContentRoot.removeView(overlayMapView);
             overlayMapView = null;
         }
         if (mapRequested && !mapEnabled) {
             append("Instrument map is unavailable: MAPKIT_API_KEY is missing");
         }
+    }
+
+    private void attachMiniRouteGuidanceOverlayIfNeeded() {
+        if (overlayRouteGuidanceView == null || miniRouteGuidanceWindowManager != null
+                || overlayRoot == null || !overlayRoot.isAttachedToWindow()) return;
+        Display display = findInstrumentDisplay();
+        if (display == null) return;
+        Context displayContext = createDisplayContext(display);
+        miniRouteGuidanceWindowManager =
+                (WindowManager) displayContext.getSystemService(Context.WINDOW_SERVICE);
+        if (miniRouteGuidanceWindowManager == null) return;
+        int requestedWindowType = WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY;
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                637, 500, requestedWindowType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                android.graphics.PixelFormat.TRANSLUCENT);
+        params.gravity = Gravity.TOP | Gravity.RIGHT;
+        params.x = 0;
+        params.y = 0;
+        params.setTitle("Instrument route guidance");
+        try {
+            miniRouteGuidanceWindowManager.addView(overlayRouteGuidanceView, params);
+            if (activeCamera != null) {
+                float distance = demoAlertActive
+                        ? activeMinimumDistance
+                        : lastLocation == null ? 0f : SpeedCameraIndex.distanceMeters(
+                                lastLocation.getLatitude(), lastLocation.getLongitude(),
+                                activeCamera.latitude, activeCamera.longitude);
+                overlayRouteGuidanceView.updateCameraAlert(activeCamera, distance);
+            }
+            if (instrumentMapFullScreenActive) {
+                overlayRouteGuidanceView.setVisibility(View.INVISIBLE);
+            }
+            Log.i(TAG, "Mini route guidance overlay attached to displayId="
+                    + display.getDisplayId());
+        } catch (RuntimeException systemOverlayDenied) {
+            Log.w(TAG, "Mini route SYSTEM_OVERLAY denied; trying APPLICATION_OVERLAY",
+                    systemOverlayDenied);
+            try {
+                params.type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+                miniRouteGuidanceWindowManager.addView(overlayRouteGuidanceView, params);
+                if (activeCamera != null) {
+                    float distance = demoAlertActive
+                            ? activeMinimumDistance
+                            : lastLocation == null ? 0f : SpeedCameraIndex.distanceMeters(
+                                    lastLocation.getLatitude(), lastLocation.getLongitude(),
+                                    activeCamera.latitude, activeCamera.longitude);
+                    overlayRouteGuidanceView.updateCameraAlert(activeCamera, distance);
+                }
+                if (instrumentMapFullScreenActive) {
+                    overlayRouteGuidanceView.setVisibility(View.INVISIBLE);
+                }
+                Log.i(TAG, "Mini route guidance overlay attached with fallback to displayId="
+                        + display.getDisplayId());
+            } catch (Throwable fallbackError) {
+                Log.w(TAG, "Mini route guidance overlay attach failed", fallbackError);
+                miniRouteGuidanceWindowManager = null;
+            }
+        }
+    }
+
+    private void dismissMiniRouteGuidanceOverlay() {
+        if (overlayRouteGuidanceView != null && miniRouteGuidanceWindowManager != null) {
+            try {
+                miniRouteGuidanceWindowManager.removeViewImmediate(overlayRouteGuidanceView);
+            } catch (Throwable error) {
+                Log.w(TAG, "Mini route guidance overlay removal failed", error);
+            }
+        }
+        overlayRouteGuidanceView = null;
+        miniRouteGuidanceWindowManager = null;
     }
 
     private String valueText(Object value) {
@@ -3257,6 +3541,253 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    /** Compact route chrome drawn above the MapKit view in the small cluster slot. */
+    private static final class MiniRouteGuidanceView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+        private final Path arrow = new Path();
+        private String maneuverResourceId = "";
+        private String nextRoadName = "";
+        private int maneuverDistanceMeters;
+        private int routeDistanceMeters;
+        private int routeTimeSeconds;
+        private boolean maneuverVisible;
+        private boolean routeAvailable;
+        private SpeedCamera alertCamera;
+        private float alertDistanceMeters;
+
+        MiniRouteGuidanceView(Context context) {
+            super(context);
+            setBackgroundColor(Color.TRANSPARENT);
+            setClickable(false);
+        }
+
+        void update(String resourceId, String roadName, int maneuverDistance,
+                    int routeDistance, int routeTime, boolean visible,
+                    boolean hasRouteGeometry) {
+            maneuverResourceId = resourceId == null ? "" : resourceId;
+            nextRoadName = roadName == null ? "" : roadName;
+            maneuverDistanceMeters = Math.max(0, maneuverDistance);
+            routeDistanceMeters = Math.max(0, routeDistance);
+            routeTimeSeconds = Math.max(0, routeTime);
+            maneuverVisible = visible;
+            routeAvailable = hasRouteGeometry || visible
+                    || routeDistanceMeters > 0 || routeTimeSeconds > 0;
+            invalidate();
+        }
+
+        void updateCameraAlert(SpeedCamera camera, float distanceMeters) {
+            alertCamera = camera;
+            alertDistanceMeters = Math.max(0f, distanceMeters);
+            invalidate();
+        }
+
+        void clearCameraAlert() {
+            alertCamera = null;
+            alertDistanceMeters = 0f;
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float sx = getWidth() / 637f;
+            float sy = getHeight() / 500f;
+            float scale = Math.max(0.65f, Math.min(sx, sy));
+            if (alertCamera != null) {
+                drawCameraAlert(canvas, scale);
+                return;
+            }
+            if (!routeAvailable) {
+                drawNoRoute(canvas, scale);
+                return;
+            }
+            if (maneuverVisible && (!maneuverResourceId.isEmpty()
+                    || maneuverDistanceMeters > 0 || !nextRoadName.isEmpty())) {
+                drawManeuver(canvas, scale);
+            }
+            if (routeDistanceMeters > 0 || routeTimeSeconds > 0) {
+                drawProgress(canvas, scale);
+            }
+        }
+
+        private void drawCameraAlert(Canvas canvas, float scale) {
+            float left = 86f * scale;
+            float top = 118f * scale;
+            float width = 465f * scale;
+            float height = 230f * scale;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.argb(244, 9, 10, 9));
+            canvas.drawRoundRect(new RectF(left, top, left + width, top + height),
+                    28f * scale, 28f * scale, paint);
+
+            float signX = left + 112f * scale;
+            float signY = top + 93f * scale;
+            paint.setColor(Color.WHITE);
+            canvas.drawCircle(signX, signY, 58f * scale, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(10f * scale);
+            paint.setColor(Color.rgb(218, 69, 54));
+            canvas.drawCircle(signX, signY, 53f * scale, paint);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.rgb(22, 22, 21));
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTextSize((alertCamera.speed >= 100 ? 39f : 46f) * scale);
+            canvas.drawText(alertCamera.speed > 0
+                            ? String.valueOf(alertCamera.speed) : "!",
+                    signX, signY + 16f * scale, paint);
+
+            paint.setTextAlign(Paint.Align.LEFT);
+            paint.setTextSize(31f * scale);
+            paint.setColor(Color.WHITE);
+            canvas.drawText("Камера", left + 205f * scale,
+                    top + 78f * scale, paint);
+            paint.setTextSize(39f * scale);
+            canvas.drawText(ClusterGuidanceView.formatDistance(
+                            Math.max(0, Math.round(alertDistanceMeters))),
+                    left + 205f * scale, top + 129f * scale, paint);
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.NORMAL));
+            paint.setTextSize(21f * scale);
+            paint.setColor(Color.argb(220, 255, 255, 255));
+            String detail = alertCamera.speed > 0
+                    ? "Ограничение " + alertCamera.speed + " км/ч"
+                    : "Контроль движения";
+            canvas.drawText(detail, left + 42f * scale,
+                    top + 197f * scale, paint);
+        }
+
+        private void drawNoRoute(Canvas canvas, float scale) {
+            float left = 86f * scale;
+            float top = 202f * scale;
+            float width = 465f * scale;
+            float height = 74f * scale;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.argb(220, 25, 27, 31));
+            canvas.drawRoundRect(new RectF(left, top, left + width, top + height),
+                    20f * scale, 20f * scale, paint);
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextSize(25f * scale);
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setColor(Color.WHITE);
+            canvas.drawText("Маршрут не построен", left + width / 2f,
+                    top + 47f * scale, paint);
+            paint.setTextAlign(Paint.Align.LEFT);
+        }
+
+        private void drawManeuver(Canvas canvas, float scale) {
+            float left = 16f * scale;
+            float top = 16f * scale;
+            float width = 430f * scale;
+            float height = nextRoadName.isEmpty() ? 98f * scale : 126f * scale;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.argb(242, 17, 105, 224));
+            canvas.drawRoundRect(new RectF(left, top, left + width, top + height),
+                    20f * scale, 20f * scale, paint);
+
+            drawArrow(canvas, left + 54f * scale, top + 48f * scale, scale);
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextSize(35f * scale);
+            paint.setColor(Color.WHITE);
+            canvas.drawText(ClusterGuidanceView.formatDistance(maneuverDistanceMeters),
+                    left + 104f * scale, top + 61f * scale, paint);
+            if (!nextRoadName.isEmpty()) {
+                paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.NORMAL));
+                paint.setTextSize(22f * scale);
+                paint.setColor(Color.argb(230, 255, 255, 255));
+                canvas.drawText(ClusterGuidanceView.ellipsize(nextRoadName, 28),
+                        left + 20f * scale, top + 105f * scale, paint);
+            }
+        }
+
+        private void drawProgress(Canvas canvas, float scale) {
+            float left = 16f * scale;
+            float top = 418f * scale;
+            float width = 520f * scale;
+            float height = 64f * scale;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.argb(230, 25, 27, 31));
+            canvas.drawRoundRect(new RectF(left, top, left + width, top + height),
+                    17f * scale, 17f * scale, paint);
+            String distance = routeDistanceMeters > 0
+                    ? ClusterGuidanceView.formatDistance(routeDistanceMeters) : "—";
+            String duration = routeTimeSeconds > 0
+                    ? ClusterGuidanceView.formatDuration(routeTimeSeconds) : "—";
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextSize(24f * scale);
+            paint.setTextAlign(Paint.Align.LEFT);
+            paint.setColor(Color.WHITE);
+            canvas.drawText(distance + "   " + duration,
+                    left + 20f * scale, top + 41f * scale, paint);
+            if (routeTimeSeconds > 0) {
+                long arrivalMs = System.currentTimeMillis() + routeTimeSeconds * 1000L;
+                java.text.SimpleDateFormat formatter =
+                        new java.text.SimpleDateFormat("HH:mm", Locale.getDefault());
+                paint.setTextAlign(Paint.Align.RIGHT);
+                canvas.drawText(formatter.format(new java.util.Date(arrivalMs)),
+                        left + width - 20f * scale, top + 41f * scale, paint);
+            }
+            paint.setTextAlign(Paint.Align.LEFT);
+            paint.setColor(Color.rgb(54, 196, 95));
+            canvas.drawRoundRect(new RectF(left + 12f * scale,
+                            top + height - 6f * scale, left + width - 12f * scale,
+                            top + height - 2f * scale),
+                    2f * scale, 2f * scale, paint);
+        }
+
+        private void drawArrow(Canvas canvas, float cx, float cy, float scale) {
+            String id = maneuverResourceId.toLowerCase(Locale.US).replace('-', '_');
+            boolean left = id.contains("left");
+            boolean right = id.contains("right");
+            boolean uturn = id.contains("uturn") || id.contains("u_turn");
+            float direction = right ? 1f : left ? -1f : 0f;
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(8f * scale);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+            paint.setColor(Color.WHITE);
+            arrow.reset();
+            if (uturn) {
+                if (direction == 0f) direction = -1f;
+                arrow.moveTo(cx, cy + 25f * scale);
+                arrow.lineTo(cx, cy - 7f * scale);
+                arrow.quadTo(cx, cy - 27f * scale,
+                        cx + direction * 25f * scale, cy - 27f * scale);
+                arrow.lineTo(cx + direction * 34f * scale, cy - 27f * scale);
+                canvas.drawPath(arrow, paint);
+                drawArrowHead(canvas, cx + direction * 34f * scale,
+                        cy - 27f * scale, direction, 0f, scale);
+            } else if (direction != 0f) {
+                arrow.moveTo(cx, cy + 27f * scale);
+                arrow.lineTo(cx, cy - 3f * scale);
+                arrow.lineTo(cx + direction * 28f * scale, cy - 28f * scale);
+                canvas.drawPath(arrow, paint);
+                drawArrowHead(canvas, cx + direction * 28f * scale,
+                        cy - 28f * scale, direction, -1f, scale);
+            } else {
+                canvas.drawLine(cx, cy + 27f * scale, cx, cy - 29f * scale, paint);
+                drawArrowHead(canvas, cx, cy - 29f * scale, 0f, -1f, scale);
+            }
+            paint.setStyle(Paint.Style.FILL);
+        }
+
+        private void drawArrowHead(Canvas canvas, float x, float y,
+                                   float dx, float dy, float scale) {
+            float length = (float) Math.sqrt(dx * dx + dy * dy);
+            if (length < 0.1f) return;
+            dx /= length;
+            dy /= length;
+            float px = -dy;
+            float py = dx;
+            float back = 17f * scale;
+            float wing = 10f * scale;
+            arrow.reset();
+            arrow.moveTo(x, y);
+            arrow.lineTo(x - dx * back + px * wing, y - dy * back + py * wing);
+            arrow.moveTo(x, y);
+            arrow.lineTo(x - dx * back - px * wing, y - dy * back - py * wing);
+            canvas.drawPath(arrow, paint);
+        }
+    }
+
     /** Transparent route chrome drawn above Yandex ClusterMapActivity only. */
     private static final class ClusterGuidanceView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -3319,8 +3850,10 @@ public final class MainActivity extends Activity {
                     break;
                 case CLUSTER_MANEUVER_POSITION_UPPER_INNER:
                 default:
-                    x = 460f * scale;
-                    y = 26f * scale;
+                    // Keep the card clear of the transmission/temperature strip and
+                    // move it towards the speed-limit area requested by the owner.
+                    x = 1310f * scale;
+                    y = 90f * scale;
                     break;
             }
             float width = 400f * scale;
@@ -3400,10 +3933,12 @@ public final class MainActivity extends Activity {
         }
 
         private void drawRouteProgress(Canvas canvas, float scale) {
-            float x = 24f * scale;
-            float y = 625f * scale;
             float width = 530f * scale;
             float height = 69f * scale;
+            // Keep the summary centred horizontally. The previous 79.5% anchor
+            // moved it too far right and placed it over the coolant/fuel area.
+            float x = (getWidth() - width) * 0.5f;
+            float y = 590f * scale;
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(Color.argb(220, 25, 27, 31));
             canvas.drawRoundRect(new RectF(x, y, x + width, y + height),
@@ -3477,6 +4012,10 @@ public final class MainActivity extends Activity {
         void setRadarIdle(boolean radarIdle) {
             if (awdView != null) awdView.setRadarIdle(radarIdle);
         }
+
+        void setBlankIdle(boolean blankIdle) {
+            if (awdView != null) awdView.setBlankIdle(blankIdle);
+        }
     }
 
     private static final class AwdView extends View {
@@ -3495,6 +4034,7 @@ public final class MainActivity extends Activity {
         private long alertFadeOutStartedAtMs;
         private boolean radarIdle;
         private boolean mapIdle;
+        private boolean blankIdle;
 
         AwdView(Context context) {
             super(context);
@@ -3519,6 +4059,13 @@ public final class MainActivity extends Activity {
         void setMapIdle(boolean mapIdle) {
             if (this.mapIdle == mapIdle) return;
             this.mapIdle = mapIdle;
+            lastFrameTimeMs = 0L;
+            postInvalidateOnAnimation();
+        }
+
+        void setBlankIdle(boolean blankIdle) {
+            if (this.blankIdle == blankIdle) return;
+            this.blankIdle = blankIdle;
             lastFrameTimeMs = 0L;
             postInvalidateOnAnimation();
         }
@@ -3556,7 +4103,7 @@ public final class MainActivity extends Activity {
             float scale = Math.max(0.75f, Math.min(w, h) / 637f);
 
             RectF panel = new RectF(w * 0.405f, h * 0.13f, w * 0.84f, h * 0.61f);
-            if (mapIdle && alertCamera == null) return;
+            if ((mapIdle || blankIdle) && alertCamera == null) return;
             // Keep the normal AWD visualization open over the stock cluster background.
             // Camera and radar states retain a dark panel for text/icon readability.
             if (alertCamera != null || radarIdle) {
