@@ -76,6 +76,8 @@ $sources = @(
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\CameraDatabaseUpdate.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\HudDistanceEncoder.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\HudNavigationTextEncoder.java'),
+    (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\InstrumentCameraPolicy.java'),
+    (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\InstrumentOverlayLifecyclePolicy.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\NavigatorRouteFreshnessPolicy.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\SpeedCamera.java'),
     (Join-Path $projectRoot 'src\com\example\instrumentawdprobe\SpeedCameraIndex.java'),
@@ -83,6 +85,8 @@ $sources = @(
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\CameraDatabaseUpdateTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\HudDistanceEncoderTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\HudNavigationTextEncoderTest.java'),
+    (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\InstrumentCameraPolicyTest.java'),
+    (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\InstrumentOverlayLifecyclePolicyTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\NavigatorRouteFreshnessPolicyTest.java'),
     (Join-Path $projectRoot 'tests\com\example\instrumentawdprobe\SpeedCameraIndexTest.java')
 )
@@ -105,6 +109,14 @@ if ($LASTEXITCODE -ne 0) { throw "HUD navigation text tests failed: $LASTEXITCOD
 & $java -cp "$classes;$androidJar" `
     'com.example.instrumentawdprobe.NavigatorRouteFreshnessPolicyTest'
 if ($LASTEXITCODE -ne 0) { throw "route freshness tests failed: $LASTEXITCODE" }
+
+& $java -cp "$classes;$androidJar" `
+    'com.example.instrumentawdprobe.InstrumentCameraPolicyTest'
+if ($LASTEXITCODE -ne 0) { throw "instrument camera policy tests failed: $LASTEXITCODE" }
+
+& $java -cp "$classes;$androidJar" `
+    'com.example.instrumentawdprobe.InstrumentOverlayLifecyclePolicyTest'
+if ($LASTEXITCODE -ne 0) { throw "instrument overlay lifecycle tests failed: $LASTEXITCODE" }
 
 $cameraUpdateTestRoot = Join-Path $testRoot 'camera-update'
 & $java -cp "$classes;$androidJar" `

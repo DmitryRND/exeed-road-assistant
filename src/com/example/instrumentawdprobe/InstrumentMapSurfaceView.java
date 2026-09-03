@@ -12,6 +12,7 @@ import android.graphics.PixelFormat;
 import android.graphics.PointF;
 import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.SurfaceView;
 import android.view.View;
@@ -24,14 +25,18 @@ import com.yandex.mapkit.geometry.Polyline;
 import com.yandex.mapkit.map.CameraPosition;
 import com.yandex.mapkit.map.IconStyle;
 import com.yandex.mapkit.map.MapObjectCollection;
+import com.yandex.mapkit.map.MapType;
 import com.yandex.mapkit.map.MapWindow;
 import com.yandex.mapkit.map.PlacemarkMapObject;
 import com.yandex.mapkit.map.RotationType;
 import com.yandex.mapkit.mapview.MapView;
 import com.yandex.mapkit.traffic.TrafficLayer;
+import com.yandex.mapkit.traffic.TrafficLevel;
+import com.yandex.mapkit.traffic.TrafficListener;
 import com.yandex.mapkit.user_location.UserLocationLayer;
 import com.yandex.runtime.image.ImageProvider;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -56,6 +61,26 @@ final class InstrumentMapSurfaceView extends FrameLayout {
     private int displayedCameraId = Integer.MIN_VALUE;
     private boolean mapKitAcquired;
     private boolean mapViewStarted;
+    private boolean hasCameraPosition;
+    private double lastCameraLatitude;
+    private double lastCameraLongitude;
+    private float lastCameraHeading = Float.NaN;
+    private long lastCameraUpdateMs;
+    private WeakReference<TrafficListener> trafficListenerReference;
+    private final TrafficListener trafficListener = new TrafficListener() {
+        @Override public void onTrafficChanged(TrafficLevel trafficLevel) {
+            Log.i(TAG, "Instrument traffic loaded level="
+                    + (trafficLevel == null ? "unknown" : trafficLevel.getLevel()));
+        }
+
+        @Override public void onTrafficLoading() {
+            Log.d(TAG, "Instrument traffic loading");
+        }
+
+        @Override public void onTrafficExpired() {
+            Log.w(TAG, "Instrument traffic data expired");
+        }
+    };
 
     InstrumentMapSurfaceView(Context context) {
         super(context);
@@ -72,6 +97,10 @@ final class InstrumentMapSurfaceView extends FrameLayout {
         mapView = new MapView(context);
         mapView.setNoninteractive(true);
         mapView.setBackgroundColor(Color.rgb(9, 10, 9));
+        // Do not expose the SDK bootstrap coordinate while the first real fix is
+        // pending. The previous hard-coded Rostov camera looked like a frozen map
+        // when Navigator had not emitted Y.nav.map/position yet.
+        mapView.setVisibility(View.INVISIBLE);
         promoteOpaqueSurfaces(mapView);
         addView(mapView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -101,6 +130,7 @@ final class InstrumentMapSurfaceView extends FrameLayout {
         mapWindow.setMaxFps(15);
         boolean night = (getResources().getConfiguration().uiMode
                 & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO;
+        mapWindow.getMap().setMapType(MapType.VECTOR_MAP);
         mapWindow.getMap().setNightModeEnabled(night);
         mapWindow.getMap().move(new CameraPosition(
                 ROSTOV, INITIAL_ZOOM, 0f, 0f),
@@ -110,13 +140,32 @@ final class InstrumentMapSurfaceView extends FrameLayout {
                 .createUserLocationLayer(mapWindow);
         userLocationLayer.setVisible(true);
         userLocationLayer.setHeadingModeActive(true);
-        userLocationLayer.setAutoZoomEnabled(true);
+        // Navigator broadcasts are the sole camera owner.  Auto zoom/anchor
+        // would otherwise continuously fight these moves and make the small
+        // route widget jump vertically around the vehicle marker.
+        userLocationLayer.setAutoZoomEnabled(false);
+        userLocationLayer.resetAnchor();
 
         trafficLayer = com.yandex.mapkit.MapKitFactory.getInstance()
                 .createTrafficLayer(mapWindow);
-        trafficLayer.setTrafficVisible(true);
+        trafficListenerReference = new WeakReference<>(trafficListener);
+        trafficLayer.addTrafficListener(trafficListenerReference);
+        enableTraffic("configure");
         navigatorRouteCollection = mapWindow.getMap().getMapObjects().addCollection();
         Log.i(TAG, "Instrument MapView configured night=" + night + " traffic=true");
+    }
+
+    private void enableTraffic(String source) {
+        if (trafficLayer == null || !trafficLayer.isValid()) return;
+        try {
+            // Reapply after MapView.onStart as well: on the external display the
+            // native renderer can be attached after the TrafficLayer is created.
+            trafficLayer.setTrafficVisible(true);
+            Log.d(TAG, "Instrument traffic enabled from " + source
+                    + " visible=" + trafficLayer.isTrafficVisible());
+        } catch (RuntimeException error) {
+            Log.w(TAG, "Unable to enable instrument traffic from " + source, error);
+        }
     }
 
     /** Applies the active polyline exported by the patched Yandex Navigator. */
@@ -143,14 +192,48 @@ final class InstrumentMapSurfaceView extends FrameLayout {
     }
 
     void updateNavigatorPosition(double latitude, double longitude, float heading) {
+        updatePosition(latitude, longitude, heading, "navigator");
+    }
+
+    /** Uses the accepted car/phone fix until Navigator starts publishing positions. */
+    void updateFallbackPosition(double latitude, double longitude, float heading) {
+        updatePosition(latitude, longitude, heading, "location");
+    }
+
+    private void updatePosition(double latitude, double longitude, float heading,
+                                String source) {
         if (mapWindow == null || latitude < -90d || latitude > 90d
                 || longitude < -180d || longitude > 180d) return;
+        long nowMs = SystemClock.elapsedRealtime();
+        if (!InstrumentCameraPolicy.shouldMove(
+                hasCameraPosition,
+                lastCameraLatitude,
+                lastCameraLongitude,
+                lastCameraHeading,
+                lastCameraUpdateMs,
+                latitude,
+                longitude,
+                heading,
+                nowMs)) {
+            return;
+        }
         CameraPosition current = mapWindow.getMap().getCameraPosition();
+        float azimuth = Float.isNaN(heading) ? current.getAzimuth() : heading;
         mapWindow.getMap().move(new CameraPosition(
                 new Point(latitude, longitude),
                 Math.max(16f, current.getZoom()),
-                Float.isNaN(heading) ? current.getAzimuth() : heading,
-                Math.max(30f, current.getTilt())));
+                azimuth,
+                0f),
+                new Animation(Animation.Type.SMOOTH, 0.30f), null);
+        hasCameraPosition = true;
+        lastCameraLatitude = latitude;
+        lastCameraLongitude = longitude;
+        lastCameraHeading = azimuth;
+        lastCameraUpdateMs = nowMs;
+        if (mapView != null && mapView.getVisibility() != View.VISIBLE) {
+            mapView.setVisibility(View.VISIBLE);
+        }
+        enableTraffic(source + " position");
     }
 
     private static List<Point> parseNavigatorPoints(String encodedPoints) {
@@ -288,9 +371,11 @@ final class InstrumentMapSurfaceView extends FrameLayout {
             promoteOpaqueSurfaces(mapView);
             mapView.onStart();
             mapViewStarted = true;
+            enableTraffic("MapView.onStart");
             mapView.post(new Runnable() {
                 @Override public void run() {
                     promoteOpaqueSurfaces(mapView);
+                    enableTraffic("attached frame");
                 }
             });
             Log.i(TAG, "Instrument MapView started");
@@ -300,9 +385,7 @@ final class InstrumentMapSurfaceView extends FrameLayout {
     @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
         super.onSizeChanged(width, height, oldWidth, oldHeight);
         if (userLocationLayer != null && width > 0 && height > 0) {
-            userLocationLayer.setAnchor(
-                    new PointF(width * 0.5f, height * 0.5f),
-                    new PointF(width * 0.5f, height * 0.68f));
+            userLocationLayer.resetAnchor();
             Log.i(TAG, "Instrument MapView ready size=" + width + "x" + height);
         }
     }
@@ -313,10 +396,20 @@ final class InstrumentMapSurfaceView extends FrameLayout {
             mapView.onStop();
             mapViewStarted = false;
         }
+        if (trafficLayer != null && trafficListenerReference != null
+                && trafficLayer.isValid()) {
+            try {
+                trafficLayer.removeTrafficListener(trafficListenerReference);
+            } catch (RuntimeException error) {
+                Log.w(TAG, "Unable to remove instrument traffic listener", error);
+            }
+        }
         trafficLayer = null;
+        trafficListenerReference = null;
         userLocationLayer = null;
         navigatorRouteCollection = null;
         mapWindow = null;
+        hasCameraPosition = false;
         if (mapKitAcquired) {
             mapKitAcquired = false;
             RoadAssistantApplication.releaseMapKit();

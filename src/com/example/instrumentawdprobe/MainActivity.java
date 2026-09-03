@@ -77,6 +77,7 @@ import java.net.UnknownHostException;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.Locale;
+import java.security.SecureRandom;
 
 /** Read-only probe for instrument Display 2 and the stock AWD energy-flow signals. */
 public final class MainActivity extends Activity {
@@ -92,6 +93,8 @@ public final class MainActivity extends Activity {
     private static final String PREF_CAMERA_AUDIO = "camera_audio";
     private static final String PREF_CAMERA_HUD = "camera_hud";
     private static final String PREF_CAMERA_GPS_GUARD = "camera_gps_guard";
+    private static final String PREF_PHONE_GPS_ENABLED = "phone_gps_enabled";
+    private static final String PREF_PHONE_GPS_TOKEN = "phone_gps_token";
     private static final String PREF_CAMERA_WARNING_MODE = "camera_warning_mode";
     private static final String PREF_CAMERA_SOUND = "camera_sound";
     private static final String PREF_IDLE_MODE = "idle_mode";
@@ -111,6 +114,7 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_LOCATION_PERMISSION = 1001;
     private static final long CAMERA_LOCATION_STALE_MS = 10000L;
     private static final long CAMERA_LOCATION_WATCHDOG_MS = 2000L;
+    private static final long PHONE_GPS_STALE_MS = 6000L;
     private static final String CAMERA_DATABASE_ASSET = "hud_speed.txt";
     private static final String CAMERA_DATABASE_FILE = "hud_speed.txt";
     private static final String CAMERA_DATABASE_URL =
@@ -192,6 +196,10 @@ public final class MainActivity extends Activity {
     private static final String TELENAV_ACTION = "com.telenav.app.START";
     private static final String TELENAV_EXTRA_HUD_ENABLED = "hudEnabled";
     private static final String TELENAV_EXTRA_PANEL_TBT_ENABLED = "panelTbtEnabled";
+    private static final String TELENAV_EXTRA_PANEL_TBT_SUPPRESSED =
+            "panelTbtSuppressed";
+    private static final String TELENAV_EXTRA_PANEL_TBT_STATE_MANAGED_EXTERNALLY =
+            "panelTbtStateManagedExternally";
     private static final ComponentName TELENAV_RECEIVER = new ComponentName(
             "com.telenav.app.arp", "com.telenav.app.receiver.BootReceiver");
     private static final String MEDIA_BRIDGE_PACKAGE = "ru.exeed.yandexmediabridge";
@@ -250,6 +258,8 @@ public final class MainActivity extends Activity {
     private Switch cameraAudioCheck;
     private Switch cameraHudCheck;
     private Switch cameraGpsGuardCheck;
+    private Switch phoneGpsCheck;
+    private TextView phoneGpsStatusView;
     private Switch autostartCheck;
     private Switch mediaBridgeAutoPlayCheck;
     private Switch mediaBridgeRouteCardCheck;
@@ -278,6 +288,7 @@ public final class MainActivity extends Activity {
     private Object vendorCallback;
     private IBinder ipkBinder;
     private boolean ipkBound;
+    private boolean ipkBindingRequested;
     private boolean ipkNaviCallbackRegistered;
     private boolean ipkKeyCallbackRegistered;
     private int pendingNavigationMode = -1;
@@ -287,6 +298,8 @@ public final class MainActivity extends Activity {
     private Location courseAnchorLocation;
     private long lastLocationUpdateElapsedMs;
     private long lastLocationGuardLogElapsedMs;
+    private long lastPhoneLocationElapsedMs;
+    private boolean phoneGpsWasPrimary;
     private final LocationGuard locationGuard = new LocationGuard();
     private boolean locationReceiverRegistered;
     private boolean yandexGuidanceReceiverRegistered;
@@ -300,6 +313,7 @@ public final class MainActivity extends Activity {
     private double yandexNavigationLatitude = Double.NaN;
     private double yandexNavigationLongitude = Double.NaN;
     private float yandexNavigationHeading = Float.NaN;
+    private long lastYandexPositionUpdateElapsedMs;
     private long lastYandexNavigationUpdateElapsedMs;
     private int hudNavigationTextGeneration;
     private long lastCameraScanLogMs;
@@ -334,6 +348,7 @@ public final class MainActivity extends Activity {
     private long steeringButtonDownMs;
     private boolean steeringLongPressHandled;
     private boolean instrumentMapFullScreenActive;
+    private boolean instrumentOverlayRestorePending;
     private static volatile Object instrumentModeRpcListener;
     private static volatile MainActivity activeInstance;
     private final IBinder ipkNaviCallback = new Binder() {
@@ -388,7 +403,12 @@ public final class MainActivity extends Activity {
     };
     private final Runnable showPersistentOverlay = new Runnable() {
         @Override public void run() {
-            if (isAwdEnabled()) showFullInstrumentOverlay();
+            instrumentOverlayRestorePending = false;
+            if (InstrumentOverlayLifecyclePolicy.shouldRestore(
+                    isAwdEnabled(), instrumentMapFullScreenActive,
+                    isInstrumentOverlayAttached(), false)) {
+                showFullInstrumentOverlay();
+            }
         }
     };
     private final Runnable clearDemoAlert = new Runnable() {
@@ -456,17 +476,25 @@ public final class MainActivity extends Activity {
                     }
                 } else if ("position".equals(type)
                         && intent.hasExtra("lat") && intent.hasExtra("lon")) {
-                    yandexNavigationLatitude = intent.getDoubleExtra("lat", Double.NaN);
-                    yandexNavigationLongitude = intent.getDoubleExtra("lon", Double.NaN);
+                    double latitude = intent.getDoubleExtra("lat", Double.NaN);
+                    double longitude = intent.getDoubleExtra("lon", Double.NaN);
                     Object heading = intent.getExtras() == null
                             ? null : intent.getExtras().get("heading");
+                    float parsedHeading;
                     try {
-                        yandexNavigationHeading = heading == null
+                        parsedHeading = heading == null
                                 ? Float.NaN : Float.parseFloat(String.valueOf(heading));
                     } catch (NumberFormatException ignored) {
-                        yandexNavigationHeading = Float.NaN;
+                        parsedHeading = Float.NaN;
                     }
-                    if (overlayMapView != null) {
+                    if (isValidMapPosition(latitude, longitude)) {
+                        yandexNavigationLatitude = latitude;
+                        yandexNavigationLongitude = longitude;
+                        yandexNavigationHeading = parsedHeading;
+                        lastYandexPositionUpdateElapsedMs = nowElapsedMs;
+                    }
+                    if (overlayMapView != null
+                            && isValidMapPosition(latitude, longitude)) {
                         overlayMapView.updateNavigatorPosition(yandexNavigationLatitude,
                                 yandexNavigationLongitude, yandexNavigationHeading);
                     }
@@ -543,6 +571,7 @@ public final class MainActivity extends Activity {
         @Override public void onServiceConnected(ComponentName name, IBinder service) {
             ipkBinder = service;
             ipkBound = true;
+            ipkBindingRequested = false;
             append("IPKService подключён: " + name.flattenToShortString());
             registerIpkNaviCallback();
             registerIpkKeyCallback();
@@ -553,6 +582,7 @@ public final class MainActivity extends Activity {
         @Override public void onServiceDisconnected(ComponentName name) {
             ipkBinder = null;
             ipkBound = false;
+            ipkBindingRequested = false;
             ipkNaviCallbackRegistered = false;
             ipkKeyCallbackRegistered = false;
             append("IPKService отключён");
@@ -889,9 +919,17 @@ public final class MainActivity extends Activity {
         idleModeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
                                                   int position, long id) {
+                int selectedMode = IDLE_MODE_VALUES[Math.max(0,
+                        Math.min(IDLE_MODE_VALUES.length - 1, position))];
+                int storedMode = getSharedPreferences(PREFS, MODE_PRIVATE)
+                        .getInt(PREF_IDLE_MODE, IDLE_MODE_AWD);
+                // Spinner dispatches its current selection while the settings
+                // screen is being built.  That is not a mode change and must
+                // not refresh the already running instrument widget.
+                if (!InstrumentOverlayLifecyclePolicy.isModeChange(
+                        storedMode, selectedMode)) return;
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .putInt(PREF_IDLE_MODE, IDLE_MODE_VALUES[Math.max(0,
-                                Math.min(IDLE_MODE_VALUES.length - 1, position))]).apply();
+                        .putInt(PREF_IDLE_MODE, selectedMode).apply();
                 updateOverlayIdleMode();
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
@@ -1019,6 +1057,45 @@ public final class MainActivity extends Activity {
             }
         });
         addSettingsCheckBox(root, cameraGpsGuardCheck);
+
+        phoneGpsCheck = new Switch(this);
+        phoneGpsCheck.setText("Использовать GPS телефона по Wi‑Fi");
+        phoneGpsCheck.setChecked(preferences.getBoolean(PREF_PHONE_GPS_ENABLED, false));
+        phoneGpsCheck.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                boolean enabled = phoneGpsCheck.isChecked();
+                if (enabled) ensurePhoneGpsPairingToken(false);
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(PREF_PHONE_GPS_ENABLED, enabled).apply();
+                resetPhoneGpsSelection();
+                refreshPhoneGpsSource();
+                updatePhoneGpsStatus();
+                append(enabled
+                        ? "GPS телефона включён: ожидание пакетов по Wi‑Fi"
+                        : "GPS телефона выключен: используется GPS автомобиля");
+            }
+        });
+        addSettingsCheckBox(root, phoneGpsCheck);
+
+        phoneGpsStatusView = new TextView(this);
+        phoneGpsStatusView.setTextSize(16f);
+        phoneGpsStatusView.setTextColor(Color.rgb(82, 79, 74));
+        phoneGpsStatusView.setPadding(dp(18), 0, dp(18), dp(8));
+        root.addView(phoneGpsStatusView, matchWrap());
+        Button renewPhoneGpsCode = createControlButton("Новый код для телефона",
+                Color.rgb(105, 103, 98), Color.WHITE);
+        renewPhoneGpsCode.setTextSize(18f);
+        renewPhoneGpsCode.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                String code = ensurePhoneGpsPairingToken(true);
+                resetPhoneGpsSelection();
+                refreshPhoneGpsSource();
+                updatePhoneGpsStatus();
+                append("Создан новый код GPS телефона: " + code);
+            }
+        });
+        root.addView(renewPhoneGpsCode, matchWrap());
+        updatePhoneGpsStatus();
 
         TextView warningModeLabel = new TextView(this);
         warningModeLabel.setText("Когда предупреждать о скоростных камерах");
@@ -1346,12 +1423,25 @@ public final class MainActivity extends Activity {
         getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit().putBoolean(PREF_ENABLED, true).apply();
         liveFullOverlay = true;
-        updateControlUi(true, "Включаем…");
+        boolean needsInstrumentRestore = InstrumentOverlayLifecyclePolicy.shouldRestore(
+                true, instrumentMapFullScreenActive, isInstrumentOverlayAttached(),
+                instrumentOverlayRestorePending);
+        updateControlUi(true, needsInstrumentRestore ? "Включаем…" : "Включено");
+        // These recovery operations are idempotent. Keep the car callbacks
+        // alive after a stock-service restart, but do not re-send transaction
+        // 3 or recreate the MapKit surface just because Settings was opened.
         connectToCarService();
         startCameraMonitoring();
-        requestNavigationMode(true);
         updateSteeringInputShortcut();
+        ensureIpkBound();
+        if (!needsInstrumentRestore) {
+            Log.i(TAG, "AWD display already active or restore pending; "
+                    + "settings opened without cluster refresh");
+            return;
+        }
         overlayHandler.removeCallbacks(showPersistentOverlay);
+        instrumentOverlayRestorePending = true;
+        requestNavigationMode(true);
         overlayHandler.postDelayed(showPersistentOverlay, 900L);
     }
 
@@ -1362,6 +1452,7 @@ public final class MainActivity extends Activity {
                 .edit().putBoolean(PREF_ENABLED, false).apply();
         liveFullOverlay = false;
         overlayHandler.removeCallbacks(showPersistentOverlay);
+        instrumentOverlayRestorePending = false;
         dismissInstrumentOverlay();
         dismissPresentation();
         disconnectFromCarService();
@@ -1372,7 +1463,7 @@ public final class MainActivity extends Activity {
         releaseSteeringInputShortcut();
         requestNavigationMode(false);
         if (wasFullScreen) sendNeusoftNavigationState(false);
-        syncFakeTeleNavNavigationOutputs();
+        syncFakeTeleNavNavigationOutputs(wasFullScreen);
         updateControlUi(false, "Выключено");
     }
 
@@ -1413,10 +1504,17 @@ public final class MainActivity extends Activity {
             flushPendingNavigationMode();
             return;
         }
+        ensureIpkBound();
+    }
+
+    /** Binds the stock service without queuing a navigation-state change. */
+    private void ensureIpkBound() {
+        if (ipkBound || ipkBinder != null || ipkBindingRequested) return;
         Intent intent = new Intent(IPK_ACTION);
         intent.setComponent(new ComponentName(IPK_PACKAGE, IPK_SERVICE));
         try {
             boolean requested = bindService(intent, ipkConnection, Context.BIND_AUTO_CREATE);
+            ipkBindingRequested = requested;
             if (!requested) {
                 setControlError("Не удалось подключиться к службе приборной панели");
             }
@@ -1491,24 +1589,35 @@ public final class MainActivity extends Activity {
 
     private boolean shouldEnableFakeTeleNavInstrumentTbt() {
         return getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getBoolean(PREF_INSTRUMENT_TBT, true)
-                && !instrumentMapFullScreenActive;
+                .getBoolean(PREF_INSTRUMENT_TBT, true);
     }
 
     private void syncFakeTeleNavNavigationOutputs() {
+        syncFakeTeleNavNavigationOutputs(instrumentMapFullScreenActive);
+    }
+
+    private void syncFakeTeleNavNavigationOutputs(boolean panelStateManagedExternally) {
         try {
             boolean hudEnabled = getSharedPreferences(PREFS, MODE_PRIVATE)
                     .getBoolean(PREF_NAVIGATION_HUD, true);
             boolean instrumentEnabled = shouldEnableFakeTeleNavInstrumentTbt();
+            boolean instrumentSuppressed = instrumentMapFullScreenActive;
             Intent control = new Intent(TELENAV_ACTION).setComponent(TELENAV_RECEIVER);
+            control.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES
+                    | Intent.FLAG_RECEIVER_FOREGROUND);
             control.putExtra(TELENAV_EXTRA_HUD_ENABLED, hudEnabled);
             control.putExtra(TELENAV_EXTRA_PANEL_TBT_ENABLED, instrumentEnabled);
+            control.putExtra(TELENAV_EXTRA_PANEL_TBT_SUPPRESSED, instrumentSuppressed);
+            control.putExtra(TELENAV_EXTRA_PANEL_TBT_STATE_MANAGED_EXTERNALLY,
+                    panelStateManagedExternally);
             sendBroadcast(control);
             Log.i(TAG, "FakeTeleNav outputs hud=" + hudEnabled
                     + " instrument=" + instrumentEnabled
-                    + " fullScreen=" + instrumentMapFullScreenActive
+                    + " suppressed=" + instrumentSuppressed
+                    + " externalState=" + panelStateManagedExternally
                     + " routeWidget=" + shouldShowRouteIdle());
         } catch (Throwable error) {
+            ipkBindingRequested = false;
             Log.w(TAG, "FakeTeleNav output sync failed", error);
         }
     }
@@ -1607,14 +1716,7 @@ public final class MainActivity extends Activity {
         if (requestedMode == IPK_REQUEST_FULL_SCREEN) {
             launchYandexMapsOnInstrumentDisplay();
         } else if (requestedMode == IPK_REQUEST_MINI) {
-            instrumentMapFullScreenActive = false;
-            syncFakeTeleNavNavigationOutputs();
-            dismissClusterGuidanceOverlay();
-            sendNeusoftNavigationState(false);
-            sendNavigationStatus(IPK_WIDGET_MAP_MODE, 3);
-            if (overlayRoot == null) showFullInstrumentOverlay();
-            refreshLauncherRouteCard();
-            append("Instrument map returned to MINI mode");
+            returnInstrumentMapToMini("IPK instrument request");
         }
     }
 
@@ -1654,13 +1756,8 @@ public final class MainActivity extends Activity {
                 @Override public void run() { refreshSteeringMediaPriority(); }
             }, 500L);
         } catch (Throwable error) {
-            instrumentMapFullScreenActive = false;
-            syncFakeTeleNavNavigationOutputs();
-            dismissClusterGuidanceOverlay();
             appendFailure("Yandex Navi cluster launch failed", error);
-            sendNeusoftNavigationState(false);
-            sendNavigationStatus(IPK_WIDGET_MAP_MODE, 3);
-            restoreInstrumentOverlayVisibility();
+            returnInstrumentMapToMini("Yandex Navi launch recovery");
         }
     }
 
@@ -1715,7 +1812,6 @@ public final class MainActivity extends Activity {
 
     private void returnInstrumentMapToMini(String source) {
         instrumentMapFullScreenActive = false;
-        syncFakeTeleNavNavigationOutputs();
         dismissClusterGuidanceOverlay();
         append(source + ": returning instrument panel to MINI mode");
         // Reproduce the verified off/on protocol sequence without destroying the
@@ -1727,6 +1823,7 @@ public final class MainActivity extends Activity {
             @Override public void run() {
                 sendNavigationStatus(IPK_WIDGET_MAP_MODE, 3);
                 restoreInstrumentOverlayVisibility();
+                syncFakeTeleNavNavigationOutputs(true);
                 refreshLauncherRouteCard();
                 append("Instrument MINI overlay restored without MapKit restart");
             }
@@ -1832,6 +1929,37 @@ public final class MainActivity extends Activity {
         updateClusterGuidanceOverlay();
     }
 
+    private static boolean isValidMapPosition(double latitude, double longitude) {
+        return !Double.isNaN(latitude) && !Double.isInfinite(latitude)
+                && !Double.isNaN(longitude) && !Double.isInfinite(longitude)
+                && latitude >= -90d && latitude <= 90d
+                && longitude >= -180d && longitude <= 180d;
+    }
+
+    private void updateInstrumentMapFromAcceptedLocation(Location location, long nowElapsedMs) {
+        if (overlayMapView == null || location == null
+                || !InstrumentCameraPolicy.shouldUseFallbackPosition(
+                lastYandexPositionUpdateElapsedMs, nowElapsedMs)) {
+            return;
+        }
+        float heading = location.hasBearing() ? location.getBearing() : Float.NaN;
+        overlayMapView.updateFallbackPosition(
+                location.getLatitude(), location.getLongitude(), heading);
+    }
+
+    private void updateInstrumentMapFromBestPosition() {
+        if (overlayMapView == null) return;
+        long nowElapsedMs = SystemClock.elapsedRealtime();
+        if (!InstrumentCameraPolicy.shouldUseFallbackPosition(
+                lastYandexPositionUpdateElapsedMs, nowElapsedMs)
+                && isValidMapPosition(yandexNavigationLatitude, yandexNavigationLongitude)) {
+            overlayMapView.updateNavigatorPosition(yandexNavigationLatitude,
+                    yandexNavigationLongitude, yandexNavigationHeading);
+            return;
+        }
+        updateInstrumentMapFromAcceptedLocation(lastLocation, nowElapsedMs);
+    }
+
     private boolean hasYandexNavigationState() {
         return !yandexRoutePoints.isEmpty()
                 || !yandexManeuverResourceId.isEmpty()
@@ -1853,8 +1981,10 @@ public final class MainActivity extends Activity {
         yandexNavigationLatitude = Double.NaN;
         yandexNavigationLongitude = Double.NaN;
         yandexNavigationHeading = Float.NaN;
+        lastYandexPositionUpdateElapsedMs = 0L;
         lastYandexNavigationUpdateElapsedMs = 0L;
         if (overlayMapView != null) overlayMapView.clearNavigatorRoute();
+        updateInstrumentMapFromAcceptedLocation(lastLocation, SystemClock.elapsedRealtime());
         updateNavigationGuidanceViews();
         Log.i(TAG, reason);
     }
@@ -2309,6 +2439,8 @@ public final class MainActivity extends Activity {
         overlayHandler.removeCallbacks(cameraLocationWatchdog);
         overlayHandler.removeCallbacks(navigatorRouteFreshnessWatchdog);
         overlayHandler.postDelayed(cameraLocationWatchdog, CAMERA_LOCATION_WATCHDOG_MS);
+        overlayHandler.postDelayed(navigatorRouteFreshnessWatchdog,
+                NavigatorRouteFreshnessPolicy.WATCHDOG_INTERVAL_MS);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         if (locationManager == null) {
             append("LocationManager недоступен");
@@ -2331,6 +2463,54 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private boolean isPhoneGpsEnabled() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(PREF_PHONE_GPS_ENABLED, false);
+    }
+
+    private String ensurePhoneGpsPairingToken(boolean renew) {
+        String current = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString(PREF_PHONE_GPS_TOKEN, "");
+        if (!renew && current != null && current.length() >= 12) return current;
+        byte[] value = new byte[12];
+        new SecureRandom().nextBytes(value);
+        StringBuilder token = new StringBuilder(24);
+        for (byte one : value) token.append(String.format(Locale.US, "%02x", one & 0xff));
+        String result = token.toString();
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(PREF_PHONE_GPS_TOKEN, result).apply();
+        return result;
+    }
+
+    private void refreshPhoneGpsSource() {
+        Intent serviceIntent = new Intent(this, CameraLocationService.class)
+                .setAction(CameraLocationService.ACTION_REFRESH_PHONE_GPS);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent);
+        else startService(serviceIntent);
+    }
+
+    private void resetPhoneGpsSelection() {
+        lastPhoneLocationElapsedMs = 0L;
+        phoneGpsWasPrimary = false;
+        locationGuard.reset();
+        courseAnchorLocation = null;
+    }
+
+    private void updatePhoneGpsStatus() {
+        if (phoneGpsStatusView == null) return;
+        if (!isPhoneGpsEnabled()) {
+            phoneGpsStatusView.setText("Телефон: выключен; GPS автомобиля используется всегда.");
+            return;
+        }
+        long ageMs = SystemClock.elapsedRealtime() - lastPhoneLocationElapsedMs;
+        if (lastPhoneLocationElapsedMs > 0L && ageMs <= PHONE_GPS_STALE_MS) {
+            phoneGpsStatusView.setText("Телефон: GPS принимается; при потере вернётся GPS автомобиля.");
+            return;
+        }
+        phoneGpsStatusView.setText("Телефон: ожидание Wi‑Fi. Код: "
+                + ensurePhoneGpsPairingToken(false));
+    }
+
     private void stopCameraMonitoring() {
         // onDestroy may be called when the control Activity is merely replaced or
         // reclaimed. Keep the foreground monitor alive while the feature is enabled.
@@ -2348,6 +2528,7 @@ public final class MainActivity extends Activity {
         lastLocation = null;
         courseAnchorLocation = null;
         lastLocationUpdateElapsedMs = 0L;
+        resetPhoneGpsSelection();
         lastLocationGuardLogElapsedMs = 0L;
         locationGuard.reset();
         lastCameraScanLogMs = 0L;
@@ -2367,8 +2548,31 @@ public final class MainActivity extends Activity {
 
     private void handleCameraLocation(Location location) {
         SpeedCameraIndex index = cameraIndex;
-        if (demoAlertActive) return;
         if (location != null) {
+            final boolean phoneSample = "phone-gps".equals(location.getProvider());
+            final long nowElapsedMs = SystemClock.elapsedRealtime();
+            if (phoneSample) {
+                if (!isPhoneGpsEnabled()) return;
+                if (!phoneGpsWasPrimary) {
+                    locationGuard.reset();
+                    courseAnchorLocation = null;
+                    phoneGpsWasPrimary = true;
+                    append("Камеры: источник GPS переключён на телефон");
+                }
+                lastPhoneLocationElapsedMs = nowElapsedMs;
+                updatePhoneGpsStatus();
+            } else if (isPhoneGpsEnabled() && lastPhoneLocationElapsedMs > 0L
+                    && nowElapsedMs - lastPhoneLocationElapsedMs <= PHONE_GPS_STALE_MS) {
+                // A fresh phone fix is primary. The service still receives vehicle fixes so
+                // fallback is immediate when the Wi-Fi link goes away.
+                return;
+            } else if (phoneGpsWasPrimary) {
+                locationGuard.reset();
+                courseAnchorLocation = null;
+                phoneGpsWasPrimary = false;
+                updatePhoneGpsStatus();
+                append("Камеры: связь с GPS телефона потеряна, используется GPS автомобиля");
+            }
             if (isGpsGuardEnabled()) {
                 LocationGuard.Result guardResult = locationGuard.filter(location);
                 if (!guardResult.isAccepted()) {
@@ -2395,7 +2599,14 @@ public final class MainActivity extends Activity {
                         + location.getAccuracy() + " m");
                 return;
             }
-            lastLocationUpdateElapsedMs = SystemClock.elapsedRealtime();
+            lastLocationUpdateElapsedMs = nowElapsedMs;
+            updateInstrumentMapFromAcceptedLocation(location, nowElapsedMs);
+        }
+        // A demo camera alert suppresses only the real radar lookup. It must not
+        // freeze the shared location stream that keeps the instrument map centred.
+        if (demoAlertActive) {
+            lastLocation = location == null ? null : new Location(location);
+            return;
         }
         if (!isAwdEnabled() || index == null || location == null) {
             lastLocation = location;
@@ -2403,18 +2614,22 @@ public final class MainActivity extends Activity {
         }
         boolean hasCourse = location.hasBearing() && location.getSpeed() > 1.2f;
         float course = hasCourse ? location.getBearing() : 0f;
-        boolean gpsSample = LocationManager.GPS_PROVIDER.equals(location.getProvider());
+        boolean gpsSample = LocationManager.GPS_PROVIDER.equals(location.getProvider())
+                || "phone-gps".equals(location.getProvider());
         boolean moving = !location.hasSpeed() || location.getSpeed() > 0.8f;
         if (!hasCourse && gpsSample && moving && courseAnchorLocation != null
-                && LocationManager.GPS_PROVIDER.equals(courseAnchorLocation.getProvider())) {
+                && (LocationManager.GPS_PROVIDER.equals(courseAnchorLocation.getProvider())
+                || "phone-gps".equals(courseAnchorLocation.getProvider()))) {
             float anchorDistance = courseAnchorLocation.distanceTo(location);
             if (anchorDistance >= 6f) {
                 course = courseAnchorLocation.bearingTo(location);
                 hasCourse = true;
             }
         }
-        if (gpsSample && (courseAnchorLocation == null || hasCourse
-                || !LocationManager.GPS_PROVIDER.equals(courseAnchorLocation.getProvider()))) {
+        boolean anchorIsGpsSample = courseAnchorLocation != null
+                && (LocationManager.GPS_PROVIDER.equals(courseAnchorLocation.getProvider())
+                || "phone-gps".equals(courseAnchorLocation.getProvider()));
+        if (gpsSample && (courseAnchorLocation == null || hasCourse || !anchorIsGpsSample)) {
             courseAnchorLocation = new Location(location);
         }
         lastLocation = new Location(location);
@@ -2992,6 +3207,11 @@ public final class MainActivity extends Activity {
     }
 
     private void showInstrumentOverlay(boolean fullScreen) {
+        if (isInstrumentOverlayAttached()) {
+            updateControlUi(true, "Включено");
+            Log.i(TAG, "Instrument overlay already attached; keeping current MapKit surface");
+            return;
+        }
         Display display = findInstrumentDisplay();
         if (display == null) {
             append("External instrument display not found; overlay not created");
@@ -3339,6 +3559,7 @@ public final class MainActivity extends Activity {
     private void updateOverlayIdleMode() {
         if (instrumentMapFullScreenActive && !shouldShowRouteIdle()) {
             returnInstrumentMapToMini("Instrument widget mode changed");
+            return;
         }
         boolean radarIdle = shouldShowRadarIdle();
         if (overlayView != null) overlayView.setRadarIdle(radarIdle);
@@ -3367,11 +3588,7 @@ public final class MainActivity extends Activity {
             if (!yandexRoutePoints.isEmpty()) {
                 overlayMapView.updateNavigatorRoute(yandexRoutePoints);
             }
-            if (!Double.isNaN(yandexNavigationLatitude)
-                    && !Double.isNaN(yandexNavigationLongitude)) {
-                overlayMapView.updateNavigatorPosition(yandexNavigationLatitude,
-                        yandexNavigationLongitude, yandexNavigationHeading);
-            }
+            updateInstrumentMapFromBestPosition();
             overlayRouteGuidanceView = new MiniRouteGuidanceView(
                     overlayContentRoot.getContext());
             overlayRouteGuidanceView.update(yandexManeuverResourceId, yandexNextRoadName,
@@ -3388,6 +3605,10 @@ public final class MainActivity extends Activity {
         if (mapRequested && !mapEnabled) {
             append("Instrument map is unavailable: MAPKIT_API_KEY is missing");
         }
+    }
+
+    private boolean isInstrumentOverlayAttached() {
+        return overlayRoot != null && overlayRoot.isAttachedToWindow();
     }
 
     private void attachMiniRouteGuidanceOverlayIfNeeded() {
@@ -3509,6 +3730,7 @@ public final class MainActivity extends Activity {
         overlayHandler.removeCallbacks(showPersistentOverlay);
         overlayHandler.removeCallbacks(clearDemoAlert);
         overlayHandler.removeCallbacks(cameraLocationWatchdog);
+        overlayHandler.removeCallbacks(navigatorRouteFreshnessWatchdog);
         stopCameraMonitoring();
         releaseAlertSound();
         releaseSteeringInputShortcut();
@@ -3526,6 +3748,7 @@ public final class MainActivity extends Activity {
             }
         }
         ipkBound = false;
+        ipkBindingRequested = false;
         ipkBinder = null;
         ipkKeyCallbackRegistered = false;
         if (locationReceiverRegistered) {

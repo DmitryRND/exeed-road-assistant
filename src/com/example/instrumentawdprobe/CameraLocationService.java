@@ -20,7 +20,12 @@ import android.util.Log;
 public final class CameraLocationService extends Service {
     static final String ACTION_LOCATION_UPDATE =
             "com.example.instrumentawdprobe.action.LOCATION_UPDATE";
+    static final String ACTION_REFRESH_PHONE_GPS =
+            "com.example.instrumentawdprobe.action.REFRESH_PHONE_GPS";
     static final String EXTRA_LOCATION = "location";
+    static final String PREFS = "awd_display";
+    static final String PREF_PHONE_GPS_ENABLED = "phone_gps_enabled";
+    static final String PREF_PHONE_GPS_TOKEN = "phone_gps_token";
 
     private static final String TAG = "CameraLocationService";
     private static final String CHANNEL_ID = "camera_location";
@@ -28,6 +33,8 @@ public final class CameraLocationService extends Service {
 
     private LocationManager locationManager;
     private boolean updatesStarted;
+    private PhoneLocationReceiver phoneLocationReceiver;
+    private String activePhoneToken = "";
 
     private final LocationListener listener = new LocationListener() {
         @Override public void onLocationChanged(Location location) {
@@ -47,11 +54,42 @@ public final class CameraLocationService extends Service {
         super.onCreate();
         startAsForeground();
         startLocationUpdates();
+        refreshPhoneGpsReceiver();
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         startLocationUpdates();
+        refreshPhoneGpsReceiver();
         return START_STICKY;
+    }
+
+    private void refreshPhoneGpsReceiver() {
+        boolean enabled = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(PREF_PHONE_GPS_ENABLED, false);
+        String token = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString(PREF_PHONE_GPS_TOKEN, "");
+        if (!enabled || token == null || token.length() < 12) {
+            if (phoneLocationReceiver != null) phoneLocationReceiver.stop();
+            phoneLocationReceiver = null;
+            activePhoneToken = "";
+            return;
+        }
+        if (phoneLocationReceiver != null && token.equals(activePhoneToken)) return;
+        if (phoneLocationReceiver != null) phoneLocationReceiver.stop();
+        phoneLocationReceiver = new PhoneLocationReceiver(new PhoneLocationReceiver.Listener() {
+            @Override public void onPhoneLocation(Location location) {
+                Intent update = new Intent(ACTION_LOCATION_UPDATE);
+                update.setPackage(getPackageName());
+                update.putExtra(EXTRA_LOCATION, location);
+                sendBroadcast(update);
+            }
+
+            @Override public void onPhoneLocationError(String detail) {
+                Log.w(TAG, "Phone GPS receiver error: " + detail);
+            }
+        });
+        phoneLocationReceiver.start(token);
+        activePhoneToken = token;
     }
 
     private void startAsForeground() {
@@ -119,6 +157,11 @@ public final class CameraLocationService extends Service {
     }
 
     @Override public void onDestroy() {
+        if (phoneLocationReceiver != null) {
+            phoneLocationReceiver.stop();
+            phoneLocationReceiver = null;
+        }
+        activePhoneToken = "";
         if (locationManager != null) {
             try { locationManager.removeUpdates(listener); }
             catch (Throwable error) { Log.w(TAG, "Unable to remove location updates", error); }
